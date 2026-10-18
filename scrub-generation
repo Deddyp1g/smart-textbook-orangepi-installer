@@ -1,0 +1,51 @@
+#!/bin/sh
+set -eu
+
+BASE=/var/lib/smart-textbook/workspaces
+GENERATION=${1:-}
+case "$GENERATION" in
+  ""|*[!A-Za-z0-9._-]*|*..*) echo "invalid generation" >&2; exit 64 ;;
+esac
+
+# The special device is single-tenant. Detached shells or student-owned
+# daemons can outlive their PTY, so terminate them before removing any work.
+command -v pkill >/dev/null 2>&1 || {
+  echo "pkill_required" >&2
+  exit 69
+}
+pkill -TERM -u student 2>/dev/null || true
+sleep 1
+pkill -KILL -u student 2>/dev/null || true
+remaining=1
+for attempt in 1 2 3 4 5; do
+  if ! pkill -0 -u student 2>/dev/null; then
+    remaining=0
+    break
+  fi
+  sleep 1
+done
+if [ "$remaining" -ne 0 ]; then
+  echo "student_processes_remain" >&2
+  exit 70
+fi
+
+# Remove the prior tenant's home after every student process is gone.
+if [ -d /home/student ]; then
+  find /home/student -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+else
+  mkdir -p /home/student
+fi
+chown student:student /home/student 2>/dev/null || true
+chmod 0700 /home/student 2>/dev/null || true
+
+# Clear student-owned temporary artifacts without disturbing system files.
+for directory in /tmp /var/tmp; do
+  if [ -d "$directory" ]; then
+    find "$directory" -xdev -mindepth 1 -maxdepth 1 -user student -exec rm -rf -- {} +
+  fi
+done
+
+rm -rf -- "$BASE/$GENERATION"
+mkdir -p -- "$BASE/$GENERATION"
+chmod 0700 -- "$BASE/$GENERATION"
+printf '%s\n' "$GENERATION" > "$BASE/$GENERATION/.scrubbed"

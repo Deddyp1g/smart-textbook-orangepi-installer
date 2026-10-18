@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "artifact_revision",
+    "compatibility",
+    "files"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "artifact_revision": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,128}$"
+    },
+    "compatibility": {
+      "type": "object"
+    },
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "path",
+          "size",
+          "sha256"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)(?!.*:).+"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "mode": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 511
+          }
+        }
+      }
+    },
+    "runtime_install": {
+      "type": "object",
+      "description": "Only user-space files inside an immutable release. Host drivers and firmware are never installed. System /usr/bin/python3 executes experiments and preflight.",
+      "properties": {
+        "target_subdir": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)(?!.*:).+"
+        },
+        "archives": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "path"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)(?!.*:).+"
+              },
+              "target_subdir": {
+                "type": "string",
+                "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)(?!.*:).+"
+              },
+              "kind": {
+                "enum": [
+                  "python",
+                  "toolkit",
+                  "data",
+                  "helpers"
+                ]
+              },
+              "discard_after_extract": {
+                "type": "boolean",
+                "default": false,
+                "description": "Delete this exact verified compressed payload only after complete safe extraction. A root-only installation receipt records the signed hash, size and target; pending preflight never activates current."
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "environment": {
+          "type": "object",
+          "propertyNames": {
+            "enum": [
+              "PYTHONPATH",
+              "LD_LIBRARY_PATH",
+              "PATH",
+              "ASCEND_HOME_PATH",
+              "ASCEND_TOOLKIT_HOME",
+              "ASCEND_OPP_PATH",
+              "ASCEND_AICPU_PATH",
+              "SMART_TEXTBOOK_DATASET_ROOT",
+              "SMART_TEXTBOOK_RUNTIME_HELPERS_ROOT",
+              "OPP_ROOT",
+              "TBE_IMPL_PATH"
+            ]
+          },
+          "additionalProperties": {
+            "type": "string",
+            "description": "Release-relative path or colon-separated release-relative paths; optional ${RELEASE_ROOT}/ prefix. Build-host absolute paths are forbidden."
+          }
+        },
+        "provides": {
+          "type": "object",
+          "description": "Version claims must be proven by post-install system-Python preflight."
+        },
+        "required_packages": {
+          "type": "object",
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              {
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "python_paths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)(?!.*:).+"
+          }
+        },
+        "library_paths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)(?!.*:).+"
+          }
+        },
+        "bin_paths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)(?!.*:).+"
+          }
+        },
+        "toolkit_subdir": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)(?!.*:).+"
+        },
+        "opp_subdir": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)(?!.*:).+"
+        },
+        "data_subdir": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)(?!.*:).+"
+        },
+        "helpers_subdir": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)(?!.*:).+"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true
+}

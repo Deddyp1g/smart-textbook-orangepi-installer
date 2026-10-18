@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+PREFIX=${SMART_TEXTBOOK_AGENT_PREFIX:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}
+CANN_ENV_SCRIPT=${SMART_TEXTBOOK_AGENT_CANN_ENV_SCRIPT:-}
+if [[ -z "$CANN_ENV_SCRIPT" ]]; then
+  for candidate in /usr/local/Ascend/ascend-toolkit/set_env.sh /usr/local/Ascend/ascend-toolkit/latest/set_env.sh; do
+    [[ ! -f "$candidate" ]] || { CANN_ENV_SCRIPT=$candidate; break; }
+  done
+fi
+set +u
+if [[ -n "$CANN_ENV_SCRIPT" && -f "$CANN_ENV_SCRIPT" ]]; then . "$CANN_ENV_SCRIPT"; fi
+set -u
+# The selected release exports its CANN/Python/data paths for system Python.
+set -a
+. "$PREFIX/releases/current/runtime.env"
+set +a
+ulimit -l unlimited || true
+cd "${SMART_TEXTBOOK_AGENT_STUDENT_HOME:-/home/student}/lab_reference_mindspore"
+HELPER="${SMART_TEXTBOOK_RUNTIME_HELPERS_ROOT:-/usr/local/share/reference-labs}/train-lenet.py"
+[[ -f "$HELPER" ]] || { echo "reference experiment helper is missing" >&2; exit 1; }
+exec /usr/bin/python3 "$HELPER" --action infer --limit 256 --data "${SMART_TEXTBOOK_DATASET_ROOT:-/var/lib/smart-textbook/mindspore/mnist}"

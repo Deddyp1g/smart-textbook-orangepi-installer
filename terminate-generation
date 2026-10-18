@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+BASE=/var/lib/smart-textbook/workspaces
+GENERATION=${1:-}
+case "$GENERATION" in
+  ""|*[!A-Za-z0-9._-]*|*..*) echo "invalid generation" >&2; exit 64 ;;
+esac
+
+# Termination only removes the generation marker.  The subsequent scrub owns
+# deletion of student data and runs before this device returns to the pool.
+rm -rf -- "$BASE/$GENERATION"
