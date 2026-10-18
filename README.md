@@ -9,7 +9,7 @@
 在全新的 ARM64 Orange Pi 上执行：
 
 ```bash
-VERSION=0.1.5
+VERSION=0.1.6
 curl -fLO "https://github.com/Deddyp1g/smart-textbook-orangepi-installer/releases/download/v${VERSION}/smart-textbook-orangepi-installer-${VERSION}.tar.gz"
 curl -fLO "https://github.com/Deddyp1g/smart-textbook-orangepi-installer/releases/download/v${VERSION}/smart-textbook-orangepi-installer-${VERSION}.tar.gz.sha256"
 sha256sum -c "smart-textbook-orangepi-installer-${VERSION}.tar.gz.sha256"
@@ -27,7 +27,7 @@ sudo ./install.sh \
 
 ## 课程基础包契约
 
-`course-bundle/manifest.json` 固定了本发行包与服务器运行包的对应关系；当前正式 artifact 为 `orangepi-aarch64-ascend310b1-20261019-v15`，需要 `aarch64`、Ascend 310B1、驱动 `25.2.0`、固件 `7.3.7.0.b507`、CANN/ACL `8.0.RC3`、CPython 3.10、MindSpore `2.5.0`、NumPy `1.26.4`、SciPy `1.13.1` 和 safetensors `0.8.0`。`verify-bundle.sh` 可在没有 ARM64 设备的隔离环境中验收包内容（包括清单、独立 checksum、实验入口、参考脚本和 MNIST archive）：
+`course-bundle/manifest.json` 固定了本发行包与服务器运行包的对应关系；当前正式 artifact 为 `orangepi-aarch64-ascend310b1-20261019-v16`，需要 `aarch64`、Ascend 310B1、驱动 `25.2.0`、固件 `7.3.7.0.b507`、CANN/ACL `8.0.RC3`、CPython 3.10、MindSpore `2.5.0`、NumPy `1.26.4`、SciPy `1.13.1` 和 safetensors `0.8.0`。`verify-bundle.sh` 可在没有 ARM64 设备的隔离环境中验收包内容（包括清单、独立 checksum、实验入口、参考脚本和 MNIST archive）：
 
 ```bash
 ./verify-bundle.sh --root .
