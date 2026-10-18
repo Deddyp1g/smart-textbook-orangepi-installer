@@ -10,6 +10,6 @@ mkdir -p -- "$ROOT/dist"
 tar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 --numeric-owner \
   --exclude='./dist' --exclude='./.git' --exclude='./__pycache__' --exclude='*/__pycache__' --exclude='*.pyc' \
   -czf "$OUT" -C "$ROOT" .
-sha256sum "$OUT" > "$OUT.sha256"
+( cd "$ROOT/dist" && sha256sum "$(basename -- "$OUT")" > "$(basename -- "$OUT").sha256" )
 printf 'created %s\n' "$OUT"
 printf 'created %s\n' "$OUT.sha256"
