@@ -628,8 +628,9 @@ def cleanup_download_cache(root, kept_releases):
     return {"removed": removed, "retained": retained}
 
 
-def prune_releases(root, public_key, keep_verified=2):
+def prune_releases(root, public_key, keep_verified=2, preserve=None):
     """Keep current plus one newest verified fallback; never remove control paths."""
+    preserve = {Path(item).resolve() for item in (preserve or ())}
     current = root / "current"
     try:
         current_target = current.resolve(strict=True) if current.is_symlink() else None
@@ -663,7 +664,7 @@ def prune_releases(root, public_key, keep_verified=2):
     for item in root.iterdir():
         if item.name in {"current", ".downloads", ".sync.lock"} or item.name.startswith("."):
             continue
-        if item.is_symlink() or not item.is_dir() or item in keep_set:
+        if item.is_symlink() or not item.is_dir() or item in keep_set or item.resolve() in preserve:
             continue
         try:
             shutil.rmtree(item)
@@ -716,12 +717,34 @@ def synchronize(args):
     digest, signature = validate_manifest(manifest, artifact, args.artifact_public_key)
     revision = manifest["artifact_revision"]
     release = root / (revision + "-" + digest[:16])
-    cached = validated_cache(release, args.artifact_public_key, digest, allow_pending=True) if release.is_dir() else None
+    # Preserve a staged candidate so a failed preflight can be retried without
+    # downloading its verified archives again.
+    pending = validated_cache(release, args.artifact_public_key, digest, allow_pending=True) if release.is_dir() else None
+    # Reclaim verified stale releases before measuring the candidate budget.
+    # A board may retain a current release plus a fallback; keeping older
+    # generations would make a valid update fail its own storage preflight.
+    cleanup_before = prune_releases(root, args.artifact_public_key, preserve={release} if pending is not None else None)
+    cached = pending
     if cached is not None:
         report = verify_and_activate(root, release, cached)
         cleanup = prune_releases(root, args.artifact_public_key)
-        return {"status": "synced", "artifact_revision": revision, "cached": True, "file_count": len(manifest["files"]), "storage": {"cleanup": cleanup}, **report}
+        return {"status": "synced", "artifact_revision": revision, "cached": True, "file_count": len(manifest["files"]), "storage": {"cleanup": cleanup, "cleanup_before": cleanup_before}, **report}
+    # A previous successful install may use an immutable suffix when the
+    # canonical directory was incomplete. Reuse that verified current release
+    # after server revalidation instead of downloading a duplicate copy.
+    current = root / "current"
+    try:
+        current_release = current.resolve(strict=True) if current.is_symlink() else None
+    except OSError:
+        current_release = None
+    if current_release is not None and current_release != release and root in current_release.parents:
+        current_cached = validated_cache(current_release, args.artifact_public_key, digest)
+        if current_cached is not None:
+            report = verify_and_activate(root, current_release, current_cached)
+            cleanup = prune_releases(root, args.artifact_public_key)
+            return {"status": "synced", "artifact_revision": revision, "cached": True, "file_count": len(manifest["files"]), "storage": {"cleanup": cleanup, "cleanup_before": cleanup_before}, **report}
     storage = check_storage_capacity(root, manifest, install_userland=args.install_userland)
+    storage["cleanup_before"] = cleanup_before
     # Never repair an installed/current directory in place. An invalid immutable
     # candidate gets a new suffix, preserving the last known working current.
     if release.exists():

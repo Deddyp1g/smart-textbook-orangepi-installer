@@ -9,7 +9,7 @@
 在全新的 ARM64 Orange Pi 上执行：
 
 ```bash
-VERSION=0.1.1
+VERSION=0.1.3
 curl -fLO "https://github.com/Deddyp1g/smart-textbook-orangepi-installer/releases/download/v${VERSION}/smart-textbook-orangepi-installer-${VERSION}.tar.gz"
 curl -fLO "https://github.com/Deddyp1g/smart-textbook-orangepi-installer/releases/download/v${VERSION}/smart-textbook-orangepi-installer-${VERSION}.tar.gz.sha256"
 sha256sum -c "smart-textbook-orangepi-installer-${VERSION}.tar.gz.sha256"
