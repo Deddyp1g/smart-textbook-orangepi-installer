@@ -92,7 +92,7 @@ for cmd in curl openssl tar zstd systemctl setpriv; do command -v "$cmd" >/dev/n
 CURL_ARGS=(--fail --silent --show-error --connect-timeout 20 --max-time 60)
 [[ "$VERIFY_TLS" == true ]] || CURL_ARGS+=(--insecure)
 STAGE="bootstrap source files"
-bootstrap_files=(bootstrap-dependencies.sh agent-requirements.lock preflight.py sync-runtime-assets.py smart-textbook-runtime-agent.py smart-textbook-runtime-agent.service pty-sandbox-launcher scrub-generation terminate-generation requirements.txt runtime-manifest.schema.json provision-host-stack.py experiments/mindspore-training experiments/mindspore-evaluate experiments/mindspore-infer reference-labs/train-lenet.py)
+bootstrap_files=(bootstrap-dependencies.sh agent-requirements.lock preflight.py sync-runtime-assets.py smart-textbook-runtime-agent.py smart-textbook-runtime-agent.service pty-sandbox-launcher scrub-generation terminate-generation requirements.txt runtime-manifest.schema.json provision-host-stack.py install-course-bundle.sh verify-bundle.sh course-bundle/manifest.json course-bundle/SHA256SUMS course-bundle/data/mnist-verified.tar.zst experiments/mindspore-training experiments/mindspore-evaluate experiments/mindspore-infer reference-labs/train-lenet.py)
 need_bootstrap=0
 for file in "${bootstrap_files[@]}"; do [[ -f "$SOURCE_DIR/$file" ]] || { need_bootstrap=1; break; }; done
 if ((need_bootstrap)); then
@@ -103,12 +103,16 @@ if ((need_bootstrap)); then
     curl "${CURL_ARGS[@]}" "$SERVER_URL/api/runtime-agent/bootstrap/$file" -H "X-Runtime-Agent-Enrollment-Token: $ENROLLMENT_TOKEN" -o "$SOURCE_DIR/$file"
   done
 fi
+COURSE_SOURCE_DIR="$PACKAGE_SOURCE_DIR"
+if [[ ! -x "$COURSE_SOURCE_DIR/install-course-bundle.sh" || ! -f "$COURSE_SOURCE_DIR/course-bundle/manifest.json" ]]; then
+  COURSE_SOURCE_DIR="$SOURCE_DIR"
+fi
 STAGE="course bundle"
 # The release must carry its own verified course payload.  The helper records a
 # persistent phase marker and repairs any interrupted copy on the next run.
 install -d -m 0700 "$STATE_DIR"
-if [[ -x "$PACKAGE_SOURCE_DIR/install-course-bundle.sh" ]]; then
-  "$PACKAGE_SOURCE_DIR/install-course-bundle.sh" --source-root "$PACKAGE_SOURCE_DIR" --bundle-root "$COURSE_BUNDLE_ROOT" --data-root "$COURSE_DATA_ROOT" --state-file "$STATE_DIR/course-bundle-state.json"
+if [[ -x "$COURSE_SOURCE_DIR/install-course-bundle.sh" ]]; then
+  "$COURSE_SOURCE_DIR/install-course-bundle.sh" --source-root "$COURSE_SOURCE_DIR" --bundle-root "$COURSE_BUNDLE_ROOT" --data-root "$COURSE_DATA_ROOT" --state-file "$STATE_DIR/course-bundle-state.json"
 else
   echo "course bundle installer is absent; use a release package that includes course-bundle/" >&2
   exit 1
@@ -202,8 +206,8 @@ json_field() { "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin).get(sys
 ARTIFACT_TOKEN=$(json_field artifact_token); ARTIFACT_REVISION=$(json_field artifact_revision)
 ARTIFACT_SERVER=$(json_field artifact_server_url); SIGNER_PUBLIC_KEY=$(json_field artifact_signer_public_key)
 [[ -n "$ARTIFACT_TOKEN" && -n "$ARTIFACT_REVISION" ]] || { echo "incomplete artifact credentials" >&2; exit 1; }
-if [[ -f "$PACKAGE_SOURCE_DIR/course-bundle/manifest.json" ]]; then
-  EXPECTED_ARTIFACT_REVISION="$($PYTHON - "$PACKAGE_SOURCE_DIR/course-bundle/manifest.json" <<'PY'
+if [[ -f "$COURSE_SOURCE_DIR/course-bundle/manifest.json" ]]; then
+  EXPECTED_ARTIFACT_REVISION="$($PYTHON - "$COURSE_SOURCE_DIR/course-bundle/manifest.json" <<'PY'
 import json,sys
 try:
  print(str(json.loads(open(sys.argv[1]).read()).get("artifact_revision") or ""))

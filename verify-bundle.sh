@@ -35,9 +35,11 @@ for item in files:
  if not source.is_file() or source.is_symlink(): raise SystemExit(f"course bundle file missing or symlink: {rel}")
  digest=hashlib.sha256(source.read_bytes()).hexdigest(); expected=str(item.get("sha256") or "")
  size=int(item.get("size")) if type(item.get("size")) is int else -1
+ mode=str(item.get("mode") or "")
+ if mode not in {"0o644","0o755"}: raise SystemExit(f"invalid course bundle mode: {rel}")
  if len(expected)!=64 or digest != expected: raise SystemExit(f"course bundle digest mismatch: {rel}")
  if size < 0 or source.stat().st_size != size: raise SystemExit(f"course bundle size mismatch: {rel}")
- checked.append({"path":rel,"size":size,"sha256":digest})
+ checked.append({"path":rel,"size":size,"mode":mode,"sha256":digest})
 if not required.issubset(seen): raise SystemExit("course bundle is missing a required experiment/data file")
 data_spec=data.get("data") or {}
 if data_spec.get("archive") != "data/mnist-verified.tar.zst" or data_spec.get("target_subdir") != "data/mnist": raise SystemExit("course bundle data contract mismatch")

@@ -80,7 +80,7 @@
       "path": "data/mnist-verified.tar.zst",
       "sha256": "3b58e2a120e47c373e970a2c9ecea1ba653e4a19ce3cfb2429e7b6ce8626728c",
       "size": 11597318,
-      "mode": "0644",
+      "mode": "0o644",
       "purpose": "verified MNIST data archive"
     }
   ],

@@ -73,7 +73,7 @@ atomic_copy() {
 verify_installed() {
   "$SOURCE_ROOT/verify-bundle.sh" --root "$SOURCE_ROOT" --quiet
   "$PYTHON" - "$SOURCE_ROOT" "$BUNDLE_ROOT" "$DATA_ROOT" <<'PY'
-import hashlib, json, os, sys
+import hashlib, json, os, stat, sys
 from pathlib import Path
 source,bundle_root,data_root=map(Path,sys.argv[1:])
 manifest=json.loads((source/'course-bundle/manifest.json').read_text())
@@ -82,8 +82,9 @@ for item in manifest['files']:
     expected=source/rel if not rel.startswith('data/') else source/'course-bundle'/rel
     installed=bundle_root/rel
     if not installed.is_file() or installed.is_symlink(): raise SystemExit(f'missing installed course file: {installed}')
-    if installed.stat().st_size != item['size'] or hashlib.sha256(installed.read_bytes()).hexdigest() != item['sha256']:
-        raise SystemExit(f'installed course file digest mismatch: {installed}')
+    expected_mode = int(str(item.get('mode', '0o644')), 8)
+    if installed.stat().st_size != item['size'] or hashlib.sha256(installed.read_bytes()).hexdigest() != item['sha256'] or stat.S_IMODE(installed.stat().st_mode) != expected_mode:
+        raise SystemExit(f'installed course file digest or mode mismatch: {installed}')
 for item in manifest.get('data',{}).get('files',[]):
     installed=data_root/item['path']
     if not installed.is_file() or installed.is_symlink(): raise SystemExit(f'missing installed MNIST file: {installed}')
@@ -105,7 +106,7 @@ atomic_copy "$SOURCE_ROOT/course-bundle/data/mnist-verified.tar.zst" "$BUNDLE_RO
 for file in mindspore-training mindspore-evaluate mindspore-infer; do
   atomic_copy "$SOURCE_ROOT/experiments/$file" "$BUNDLE_ROOT/experiments/$file" 0755
 done
-atomic_copy "$SOURCE_ROOT/reference-labs/train-lenet.py" "$BUNDLE_ROOT/reference-labs/train-lenet.py" 0644
+atomic_copy "$SOURCE_ROOT/reference-labs/train-lenet.py" "$BUNDLE_ROOT/reference-labs/train-lenet.py" 0755
 write_state extracting "copied manifest, checksum, archive and experiment entrypoints"
 COURSE_TMP="$(mktemp -d "${DATA_ROOT}.staging.XXXXXX")"
 cleanup() { rm -rf -- "$COURSE_TMP"; }
