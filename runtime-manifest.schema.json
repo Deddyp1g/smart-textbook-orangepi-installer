@@ -85,6 +85,11 @@
                 "type": "boolean",
                 "default": false,
                 "description": "Delete this exact verified compressed payload only after complete safe extraction. A root-only installation receipt records the signed hash, size and target; pending preflight never activates current."
+              },
+              "unpacked_size": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Signed uncompressed byte estimate used for pre-download disk-space checks."
               }
             },
             "additionalProperties": false

@@ -1,0 +1,65 @@
+{
+  "schema": "smart-textbook/orangepi-course-bundle/v1",
+  "bundle_revision": "20261018-v14",
+  "artifact_revision": "orangepi-aarch64-ascend310b1-20261018-v14",
+  "required_experiment_entrypoints": [
+    "experiments/mindspore-training",
+    "experiments/mindspore-evaluate",
+    "experiments/mindspore-infer"
+  ],
+  "runtime_contract": {
+    "architecture": "aarch64",
+    "device_model": "ascend310b1",
+    "driver_version": "25.2.0",
+    "firmware_version": "7.3.7.0.b507",
+    "cann_version": "8.0.RC3",
+    "acl_version": "8.0.RC3",
+    "python_abi": "cpython-310",
+    "mindspore_version": "2.5.0",
+    "numpy": "1.26.4",
+    "scipy": "1.13.1",
+    "safetensors": "0.8.0"
+  },
+  "data": {
+    "archive": "data/mnist-verified.tar.zst",
+    "target_subdir": "data/mnist",
+    "unpacked_size": 11612160
+  },
+  "files": [
+    {
+      "path": "experiments/mindspore-training",
+      "sha256": "52f916d693bf5a3dd0f98140e429425e02b72521b881ded732cabcc76ae36cf0",
+      "size": 1086,
+      "mode": "0o755",
+      "purpose": "verified MindSpore experiment entrypoint"
+    },
+    {
+      "path": "experiments/mindspore-evaluate",
+      "sha256": "726385382572249ef67b880a419d114db59c7f745bc037d77a643a27f3784574",
+      "size": 1092,
+      "mode": "0o755",
+      "purpose": "verified MindSpore experiment entrypoint"
+    },
+    {
+      "path": "experiments/mindspore-infer",
+      "sha256": "cb66e0c1c4551bf3f78cf71f003466666f690c5708476f53471338e26ccf6769",
+      "size": 1089,
+      "mode": "0o755",
+      "purpose": "verified MindSpore experiment entrypoint"
+    },
+    {
+      "path": "reference-labs/train-lenet.py",
+      "sha256": "942961c7415727b0b77337e46b3c3e28e740be44482cf67885ff66ef77fb4d31",
+      "size": 4740,
+      "mode": "0o755",
+      "purpose": "verified MindSpore reference helper"
+    },
+    {
+      "path": "data/mnist-verified.tar.zst",
+      "sha256": "3b58e2a120e47c373e970a2c9ecea1ba653e4a19ce3cfb2429e7b6ce8626728c",
+      "size": 11597318,
+      "mode": "0644",
+      "purpose": "verified MNIST data archive"
+    }
+  ]
+}

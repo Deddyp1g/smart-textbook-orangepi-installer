@@ -31,21 +31,22 @@ PREFIX=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # signed runtime environment after dropping privileges to student.
 SANDBOX_SHELL='
 set -e
+# Load the host CANN/Ascend ABI first; the signed release then contributes
+# Python, data, and helper paths without hiding the host toolkit libraries.
+for candidate in /usr/local/Ascend/ascend-toolkit/set_env.sh /usr/local/Ascend/ascend-toolkit/latest/set_env.sh; do
+  if [ -r "$candidate" ]; then source "$candidate"; break; fi
+done
 if [ -r "$SMART_TEXTBOOK_PTY_PREFIX/releases/current/runtime.env" ]; then
   source "$SMART_TEXTBOOK_PTY_PREFIX/releases/current/runtime.env"
-else
-  for candidate in /usr/local/Ascend/ascend-toolkit/set_env.sh /usr/local/Ascend/ascend-toolkit/latest/set_env.sh; do
-    if [ -r "$candidate" ]; then source "$candidate"; break; fi
-  done
 fi
 if [ -n "${ASCEND_HOME_PATH:-}" ]; then
   if [ -d "$ASCEND_HOME_PATH/include" ]; then export NPU_HOST_INC="$ASCEND_HOME_PATH/include"; else export NPU_HOST_INC="$ASCEND_HOME_PATH/runtime/include"; fi
   export NPU_HOST_LIB="$ASCEND_HOME_PATH/lib64"
 fi
-cd "$PWD"
+cd "$SMART_TEXTBOOK_WORKSPACE"
 exec /bin/bash --noprofile --norc
 '
-set -- env -i HOME=/home/student USER=student LOGNAME=student PATH=/usr/local/bin:/usr/bin:/bin PWD="$WORKSPACE" SMART_TEXTBOOK_PTY_PREFIX="$PREFIX" /bin/bash --noprofile --norc -c "$SANDBOX_SHELL"
+set -- env -i HOME=/home/student USER=student LOGNAME=student PATH=/usr/local/bin:/usr/bin:/bin PWD="$WORKSPACE" SMART_TEXTBOOK_WORKSPACE="$WORKSPACE" SMART_TEXTBOOK_PTY_PREFIX="$PREFIX" /bin/bash --noprofile --norc -c "$SANDBOX_SHELL"
 if command -v setpriv >/dev/null 2>&1; then
   # Keep the host memlock limit; ACL device setup can fail at the default 64 KiB.
   if command -v prlimit >/dev/null 2>&1; then

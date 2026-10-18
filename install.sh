@@ -16,6 +16,8 @@ STATE_DIR="${SMART_TEXTBOOK_AGENT_STATE_DIR:-/var/lib/smart-textbook/runtime-age
 SYSTEMD_DIR="${SMART_TEXTBOOK_AGENT_SYSTEMD_DIR:-/etc/systemd/system}"
 PROFILE_DIR="${SMART_TEXTBOOK_AGENT_PROFILE_DIR:-/etc/profile.d}"
 SHARED_LABS_DIR="${SMART_TEXTBOOK_AGENT_SHARED_LABS_DIR:-/usr/local/share/reference-labs}"
+COURSE_BUNDLE_ROOT="${SMART_TEXTBOOK_AGENT_COURSE_BUNDLE_ROOT:-/usr/local/share/smart-textbook/course-bundle}"
+COURSE_DATA_ROOT="${SMART_TEXTBOOK_AGENT_COURSE_DATA_ROOT:-/usr/local/share/smart-textbook/data/mnist}"
 STUDENT_HOME="${SMART_TEXTBOOK_AGENT_STUDENT_HOME:-/home/student}"
 PYTHON="${SMART_TEXTBOOK_AGENT_PYTHON:-/usr/bin/python3}"
 WHEELHOUSE="${SMART_TEXTBOOK_AGENT_WHEELHOUSE:-}"
@@ -55,6 +57,7 @@ while (($#)); do
     *) echo "unknown option" >&2; usage >&2; exit 2 ;;
   esac
 done
+PACKAGE_SOURCE_DIR="$SOURCE_DIR"
 [[ "$EUID" -eq 0 ]] || { echo "run as root" >&2; exit 1; }
 ARCH="$(uname -m)"
 [[ "$ARCH" == aarch64 || "$ARCH" == arm64 ]] || { echo "unsupported architecture: $ARCH" >&2; exit 1; }
@@ -99,6 +102,27 @@ if ((need_bootstrap)); then
     mkdir -p "$SOURCE_DIR/$(dirname "$file")"
     curl "${CURL_ARGS[@]}" "$SERVER_URL/api/runtime-agent/bootstrap/$file" -H "X-Runtime-Agent-Enrollment-Token: $ENROLLMENT_TOKEN" -o "$SOURCE_DIR/$file"
   done
+fi
+STAGE="course bundle"
+if [[ -f "$PACKAGE_SOURCE_DIR/verify-bundle.sh" ]]; then
+  "$PACKAGE_SOURCE_DIR/verify-bundle.sh" --root "$PACKAGE_SOURCE_DIR" --quiet
+  install -d -m 0755 "$COURSE_BUNDLE_ROOT" "$COURSE_BUNDLE_ROOT/data" "$COURSE_BUNDLE_ROOT/experiments" "$COURSE_BUNDLE_ROOT/reference-labs" "$COURSE_DATA_ROOT"
+  install -m 0644 "$PACKAGE_SOURCE_DIR/course-bundle/manifest.json" "$COURSE_BUNDLE_ROOT/manifest.json"
+  for file in mindspore-training mindspore-evaluate mindspore-infer; do
+    install -m 0755 "$SOURCE_DIR/experiments/$file" "$COURSE_BUNDLE_ROOT/experiments/$file"
+  done
+  install -m 0644 "$SOURCE_DIR/reference-labs/train-lenet.py" "$COURSE_BUNDLE_ROOT/reference-labs/train-lenet.py"
+  install -m 0644 "$PACKAGE_SOURCE_DIR/course-bundle/data/mnist-verified.tar.zst" "$COURSE_BUNDLE_ROOT/data/mnist-verified.tar.zst"
+  COURSE_TMP="$(mktemp -d /tmp/smart-textbook-course.XXXXXX)"
+  zstd -dc "$PACKAGE_SOURCE_DIR/course-bundle/data/mnist-verified.tar.zst" | tar --no-same-owner --no-same-permissions -x -f - -C "$COURSE_TMP"
+  for file in train-images-idx3-ubyte.gz train-labels-idx1-ubyte.gz t10k-images-idx3-ubyte.gz t10k-labels-idx1-ubyte.gz; do
+    [[ -f "$COURSE_TMP/$file" ]] || { echo "course bundle data file missing: $file" >&2; exit 1; }
+    install -m 0644 "$COURSE_TMP/$file" "$COURSE_DATA_ROOT/$file"
+  done
+  rm -rf -- "$COURSE_TMP"
+  echo "verified course bundle installed at $COURSE_BUNDLE_ROOT; data at $COURSE_DATA_ROOT" >&2
+else
+  echo "course bundle is absent from this installer source; use a GitHub release package that includes course-bundle/" >&2
 fi
 STAGE="host stack provisioning"
 install -d -m 0700 "$HOST_STACK_STATE_DIR" "$HOST_STACK_CACHE_DIR"
@@ -189,6 +213,20 @@ json_field() { "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin).get(sys
 ARTIFACT_TOKEN=$(json_field artifact_token); ARTIFACT_REVISION=$(json_field artifact_revision)
 ARTIFACT_SERVER=$(json_field artifact_server_url); SIGNER_PUBLIC_KEY=$(json_field artifact_signer_public_key)
 [[ -n "$ARTIFACT_TOKEN" && -n "$ARTIFACT_REVISION" ]] || { echo "incomplete artifact credentials" >&2; exit 1; }
+if [[ -f "$PACKAGE_SOURCE_DIR/course-bundle/manifest.json" ]]; then
+  EXPECTED_ARTIFACT_REVISION="$($PYTHON - "$PACKAGE_SOURCE_DIR/course-bundle/manifest.json" <<'PY'
+import json,sys
+try:
+ print(str(json.loads(open(sys.argv[1]).read()).get("artifact_revision") or ""))
+except Exception:
+ print("")
+PY
+)"
+  if [[ -n "$EXPECTED_ARTIFACT_REVISION" && "$ARTIFACT_REVISION" != "$EXPECTED_ARTIFACT_REVISION" ]]; then
+    echo "server artifact $ARTIFACT_REVISION does not match this installer's course bundle $EXPECTED_ARTIFACT_REVISION; download the matching release" >&2
+    exit 1
+  fi
+fi
 [[ -n "$ARTIFACT_SERVER" ]] || ARTIFACT_SERVER="$SERVER_URL"
 STAGE="agent and student initialization"
 for file in smart-textbook-runtime-agent.py sync-runtime-assets.py preflight.py pty-sandbox-launcher terminate-generation scrub-generation; do install -m 0755 "$SOURCE_DIR/$file" "$PREFIX/$file"; done

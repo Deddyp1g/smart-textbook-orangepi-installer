@@ -5,6 +5,7 @@ import argparse
 import base64
 import fcntl
 import hashlib
+import math
 import json
 import os
 import re
@@ -25,6 +26,13 @@ STATE_FILE = ".installation.json"
 RESERVED = {"manifest.json", "manifest.sig", "runtime.env", "runtime-environment.json", STATE_FILE}
 PATH_LISTS = {"PYTHONPATH", "LD_LIBRARY_PATH", "PATH"}
 SINGLE_PATHS = {"ASCEND_HOME_PATH", "ASCEND_TOOLKIT_HOME", "ASCEND_OPP_PATH", "ASCEND_AICPU_PATH", "SMART_TEXTBOOK_DATASET_ROOT", "SMART_TEXTBOOK_RUNTIME_HELPERS_ROOT", "OPP_ROOT", "TBE_IMPL_PATH"}
+
+# A signed archive manifest carries compressed bytes; extraction needs a second
+# allocation. Keep a deterministic safety margin so a new board fails before
+# downloading when its filesystem cannot complete the import.
+STORAGE_SAFETY_RATIO = 0.10
+STORAGE_MIN_SAFETY_BYTES = 256 * 1024 * 1024
+ARCHIVE_FALLBACK_EXPANSION_FACTOR = 4
 
 
 def _python_abi() -> str | None:
@@ -280,6 +288,69 @@ def runtime_environment(release, manifest):
     return env
 
 
+
+def storage_requirements(manifest, install_userland=True):
+    """Return the signed download/extraction budget for a candidate release.
+
+    ``unpacked_size`` is recorded per runtime archive when the bundle is built.
+    Older manifests may omit it; use a conservative four-times expansion
+    estimate so they still fail closed before any network write.
+    """
+    files = manifest.get("files") or []
+    file_map = {item.get("path"): item for item in files if isinstance(item, dict)}
+    try:
+        download_bytes = sum(int(item["size"]) for item in files)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("runtime_storage_estimate_invalid") from exc
+    extraction_bytes = 0
+    archives = []
+    policy = manifest.get("runtime_install") or {}
+    specs = policy.get("archives", []) if isinstance(policy, dict) else []
+    if install_userland:
+        if not isinstance(specs, list):
+            raise RuntimeError("runtime_storage_estimate_invalid")
+        for spec in specs:
+            if not isinstance(spec, dict):
+                raise RuntimeError("runtime_storage_estimate_invalid")
+            name = str(spec.get("path") or "")
+            item = file_map.get(name)
+            if not item:
+                raise RuntimeError("runtime_storage_archive_not_in_manifest")
+            try:
+                compressed = int(item["size"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise RuntimeError("runtime_storage_estimate_invalid") from exc
+            declared = spec.get("unpacked_size")
+            if declared is None:
+                unpacked = compressed * ARCHIVE_FALLBACK_EXPANSION_FACTOR
+                estimated = True
+            elif isinstance(declared, bool) or not isinstance(declared, int) or declared < 0:
+                raise RuntimeError("runtime_storage_estimate_invalid")
+            else:
+                unpacked = declared
+                estimated = False
+            extraction_bytes += unpacked
+            archives.append({"path": name, "compressed_bytes": compressed,
+                             "unpacked_bytes": unpacked, "estimated": estimated})
+    working_bytes = download_bytes + extraction_bytes
+    safety_bytes = max(STORAGE_MIN_SAFETY_BYTES, math.ceil(working_bytes * STORAGE_SAFETY_RATIO))
+    return {"download_bytes": download_bytes, "extraction_bytes": extraction_bytes,
+            "working_bytes": working_bytes, "safety_bytes": safety_bytes,
+            "required_bytes": working_bytes + safety_bytes, "archives": archives}
+
+
+def check_storage_capacity(root, manifest, install_userland=True):
+    requirements = storage_requirements(manifest, install_userland=install_userland)
+    try:
+        available = int(shutil.disk_usage(str(root)).free)
+    except OSError as exc:
+        raise RuntimeError("runtime_storage_probe_failed") from exc
+    report = dict(requirements, available_bytes=available)
+    if available < requirements["required_bytes"]:
+        detail = json.dumps(report, sort_keys=True, separators=(",", ":"))
+        raise RuntimeError("artifact_insufficient_disk_space:" + detail)
+    return report
+
 def process_environment(runtime):
     env = dict(os.environ)
     for key, value in runtime.items():
@@ -504,6 +575,11 @@ def verify_and_activate(root, release, manifest):
         raise
     receipt["phase"] = "ready"
     receipt.pop("error", None)
+    # Preflight imports the bundled runtime and may materialize bytecode or
+    # other interpreter metadata.  Refresh the integrity snapshot after that
+    # read-only validation so a verified release can be reused on the next
+    # heartbeat instead of being downloaded and extracted again.
+    receipt["tree"] = snapshot_tree(release)
     write_receipt(release, receipt)
     activate(root, release)
     return report
@@ -516,6 +592,92 @@ def activate(root, release):
         os.replace(temporary, root / "current")
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def cleanup_download_cache(root, kept_releases):
+    """Remove only hash-verified cache files no kept release references."""
+    cache = root / ".downloads"
+    if not cache.is_dir() or cache.is_symlink():
+        return {"removed": 0, "retained": 0}
+    referenced = set()
+    for release in kept_releases:
+        try:
+            manifest = json.loads((release / "manifest.json").read_text())
+        except (OSError, ValueError):
+            continue
+        for item in manifest.get("files", []):
+            if isinstance(item, dict) and re.fullmatch(r"[a-f0-9]{64}", str(item.get("sha256") or "")):
+                referenced.add(item["sha256"])
+    removed = retained = 0
+    for item in list(cache.iterdir()):
+        if item.is_symlink() or not item.is_file() or not re.fullmatch(r"[a-f0-9]{64}", item.name):
+            retained += 1
+            continue
+        try:
+            verified = hash_file(item) == item.name
+        except OSError:
+            verified = False
+        if not verified or item.name in referenced:
+            retained += 1
+            continue
+        try:
+            item.unlink()
+            removed += 1
+        except OSError:
+            retained += 1
+    return {"removed": removed, "retained": retained}
+
+
+def prune_releases(root, public_key, keep_verified=2):
+    """Keep current plus one newest verified fallback; never remove control paths."""
+    current = root / "current"
+    try:
+        current_target = current.resolve(strict=True) if current.is_symlink() else None
+    except OSError:
+        current_target = None
+    candidates = []
+    for item in root.iterdir():
+        if item.name in {"current", ".downloads", ".sync.lock"} or item.name.startswith("."):
+            continue
+        if item.is_symlink() or not item.is_dir():
+            continue
+        try:
+            verified = validated_cache(item, public_key)
+            mtime = item.stat().st_mtime_ns
+        except OSError:
+            verified, mtime = None, 0
+        if verified is not None:
+            candidates.append((item, mtime))
+    candidates.sort(key=lambda pair: pair[1], reverse=True)
+    keep = []
+    if current_target is not None and current_target.is_dir() and root in current_target.parents:
+        keep.append(current_target)
+    for item, _mtime in candidates:
+        if item in keep:
+            continue
+        if len(keep) >= max(1, int(keep_verified)):
+            break
+        keep.append(item)
+    keep_set = set(keep)
+    removed = []
+    for item in root.iterdir():
+        if item.name in {"current", ".downloads", ".sync.lock"} or item.name.startswith("."):
+            continue
+        if item.is_symlink() or not item.is_dir() or item in keep_set:
+            continue
+        try:
+            shutil.rmtree(item)
+            removed.append(item.name)
+        except OSError:
+            continue
+    cache = cleanup_download_cache(root, keep)
+    return {
+        "kept": [item.name for item in keep],
+        "fallback": next((item.name for item in keep if current_target is None or item != current_target), None),
+        "removed": removed,
+        "downloads_removed": cache["removed"],
+        "downloads_retained": cache["retained"],
+    }
 
 
 def offline_cache(root, public_key, reason):
@@ -557,7 +719,9 @@ def synchronize(args):
     cached = validated_cache(release, args.artifact_public_key, digest, allow_pending=True) if release.is_dir() else None
     if cached is not None:
         report = verify_and_activate(root, release, cached)
-        return {"status": "synced", "artifact_revision": revision, "cached": True, "file_count": len(manifest["files"]), **report}
+        cleanup = prune_releases(root, args.artifact_public_key)
+        return {"status": "synced", "artifact_revision": revision, "cached": True, "file_count": len(manifest["files"]), "storage": {"cleanup": cleanup}, **report}
+    storage = check_storage_capacity(root, manifest, install_userland=args.install_userland)
     # Never repair an installed/current directory in place. An invalid immutable
     # candidate gets a new suffix, preserving the last known working current.
     if release.exists():
@@ -598,7 +762,9 @@ def synchronize(args):
         receipt = {"manifest_sha256": digest, "phase": "staged", "consumed_archives": consumed_archives, "tree": snapshot_tree(release)}
         write_receipt(release, receipt)
         report = verify_and_activate(root, release, manifest)
-        return {"status": "synced", "artifact_revision": revision, "cached": False, "file_count": len(manifest["files"]), "userland": installed, **report}
+        cleanup = prune_releases(root, args.artifact_public_key)
+        storage["cleanup"] = cleanup
+        return {"status": "synced", "artifact_revision": revision, "cached": False, "file_count": len(manifest["files"]), "userland": installed, "storage": storage, **report}
     except Exception as exc:
         if not (release / STATE_FILE).exists():
             write_receipt(release, {"manifest_sha256": digest, "phase": "installation_failed",

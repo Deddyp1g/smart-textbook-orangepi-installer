@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Verify course bundle
+        run: ./verify-bundle.sh --root .
       - name: Build package
         run: ./build-package.sh
       - name: Publish release assets

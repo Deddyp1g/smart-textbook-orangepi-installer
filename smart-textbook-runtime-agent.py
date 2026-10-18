@@ -23,9 +23,9 @@ MAX_PTY_READ = 65536
 MAX_PTY_WRITE = 65536
 FIXED_EXPERIMENTS = {
     "reference_mindspore": {
-        "training": ["/opt/smart-textbook/runtime-agent/experiments/mindspore-training"],
-        "evaluate": ["/opt/smart-textbook/runtime-agent/experiments/mindspore-evaluate"],
-        "infer": ["/opt/smart-textbook/runtime-agent/experiments/mindspore-infer"],
+        "training": "mindspore-training",
+        "evaluate": "mindspore-evaluate",
+        "infer": "mindspore-infer",
     }
 }
 
@@ -87,6 +87,9 @@ def load_runtime_environment(root):
     allowed = {"PYTHONPATH", "LD_LIBRARY_PATH", "PATH", "ASCEND_HOME_PATH", "ASCEND_TOOLKIT_HOME", "ASCEND_OPP_PATH", "ASCEND_AICPU_PATH", "SMART_TEXTBOOK_DATASET_ROOT", "SMART_TEXTBOOK_RUNTIME_HELPERS_ROOT", "SMART_TEXTBOOK_RUNTIME_ROOT", "SMART_TEXTBOOK_RUNTIME_REVISION", "PYTHONDONTWRITEBYTECODE", "OPP_ROOT", "TBE_IMPL_PATH"}
     if not isinstance(value, dict) or any(key not in allowed or not isinstance(item, str) or "\x00" in item for key, item in value.items()):
         raise RuntimeError("runtime_environment_invalid")
+    # Experiment wrappers live under the immutable release and use this prefix
+    # to locate releases/current/runtime.env when launched by the agent.
+    value["SMART_TEXTBOOK_AGENT_PREFIX"] = str(Path(root).resolve().parent)
     return value
 
 
@@ -97,6 +100,31 @@ def runtime_facts():
         return json.loads(report.stdout)
     except Exception as exc:
         return {"status": "error", "error": type(exc).__name__}
+
+
+def cached_artifact_state(config):
+    # Return a previously verified release without rehashing its full tree.
+    try:
+        root = Path(config.get("artifact_root") or "").resolve()
+        current = root / "current"
+        release = current.resolve()
+        if not current.is_symlink() or root not in release.parents:
+            return None
+        receipt = json.loads((release / ".installation.json").read_text())
+        manifest = json.loads((release / "manifest.json").read_text())
+        revision = str(manifest.get("artifact_revision") or "")
+        expected = str(config.get("artifact_revision") or "")
+        if receipt.get("phase") != "ready" or not revision or (expected and revision != expected):
+            return None
+        environment = load_runtime_environment(root)
+        return {
+            "status": "ready",
+            "artifact_revision": revision,
+            "cache_verified": True,
+            "cached": True,
+        }, environment
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
 
 
 def sync_runtime_assets(config, device_id, publish=True):
@@ -128,7 +156,12 @@ def sync_runtime_assets(config, device_id, publish=True):
         output = (result.stdout or "").strip().splitlines()
         value = json.loads(output[-1]) if output else {}
         if result.returncode != 0:
-            value.update({"status": "error", "error": "artifact_sync_failed"})
+            # Preserve actionable sync failures (especially disk pressure) so
+            # the server heartbeat/UI can show the root cause instead of a
+            # generic permanent syncing state.
+            detail = str(value.get("detail") or "")
+            code = detail.split(":", 1)[0] if detail else ""
+            value.update({"status": "error", "error": code if code.startswith("artifact_") else "artifact_sync_failed"})
         elif value.get("status") in {"synced", "offline_cached"}:
             environment = load_runtime_environment(config["artifact_root"])
             # The sync helper has already checked package versions and preflight
@@ -139,7 +172,7 @@ def sync_runtime_assets(config, device_id, publish=True):
                 value.update({"status": "incompatible", "error": "runtime_preflight_failed"})
         else:
             value = {"status": "error", "error": "artifact_sync_invalid_response"}
-        state = {key: value[key] for key in ("status", "artifact_revision", "error", "detail", "reason", "compatibility", "cache_verified", "requires_server_revalidation", "cached") if key in value}
+        state = {key: value[key] for key in ("status", "artifact_revision", "error", "detail", "reason", "compatibility", "cache_verified", "requires_server_revalidation", "cached", "storage") if key in value}
         if publish:
             ARTIFACT_STATE = state
             LAST_ARTIFACT_SYNC = time.monotonic()
@@ -344,7 +377,7 @@ class RuntimeAgent:
         return self.authenticated and self._connection_epoch == epoch and self.generation == generation and self.transport is transport
 
     def _schedule_sync(self):
-        global ARTIFACT_STATE
+        global ARTIFACT_STATE, RUNTIME_ENVIRONMENT, LAST_ARTIFACT_SYNC
         # A real authenticated transport always uses the background worker so a
         # multi-gigabyte runtime download cannot block Socket.IO heartbeats. The
         # synchronous fallback keeps the handler deterministic for embedders and
@@ -355,6 +388,14 @@ class RuntimeAgent:
             ARTIFACT_STATE = dict(value)
             return
         with self._state_lock:
+            if not LAST_ARTIFACT_SYNC:
+                cached = cached_artifact_state(self.config)
+                if cached is not None:
+                    state, environment = cached
+                    ARTIFACT_STATE = state
+                    RUNTIME_ENVIRONMENT = environment
+                    LAST_ARTIFACT_SYNC = time.monotonic()
+                    return
             fresh = LAST_ARTIFACT_SYNC and time.monotonic() - LAST_ARTIFACT_SYNC < self.config.get("artifact_sync_interval", 300)
             same_revision = not self.config.get("artifact_revision") or self.config["artifact_revision"] == ARTIFACT_STATE.get("artifact_revision")
             if fresh and ARTIFACT_STATE.get("status") == "ready" and same_revision:
@@ -563,10 +604,27 @@ class RuntimeAgent:
     def experiment(self, args):
         experiment_id = str(args.get("experiment_id") or "")
         step = str(args.get("step") or "")
-        command = FIXED_EXPERIMENTS.get(experiment_id, {}).get(step)
-        if command is None:
+        entrypoint = FIXED_EXPERIMENTS.get(experiment_id, {}).get(step)
+        if entrypoint is None:
             return {"status": "error", "error": "experiment_step_not_allowlisted"}
-        return command_output(command, min(900, max(5, int(args.get("timeout_seconds", 300)))))
+        # Resolve the allowlisted entrypoint from the verified current release so
+        # an artifact upgrade takes effect without copying mutable files into the
+        # agent prefix. The fixed map above contains names only; user input never
+        # contributes a path component.
+        root = Path(self.config.get("artifact_root") or "/opt/smart-textbook/runtime-agent/releases").resolve()
+        current = root / "current"
+        if not current.is_symlink():
+            return {"status": "error", "error": "runtime_artifact_not_ready"}
+        try:
+            release = current.resolve()
+        except OSError:
+            return {"status": "error", "error": "runtime_artifact_not_ready"}
+        if release == root or root not in release.parents:
+            return {"status": "error", "error": "runtime_artifact_path_invalid"}
+        path = release / "experiments" / entrypoint
+        if path.is_symlink() or not path.is_file():
+            return {"status": "error", "error": "experiment_entrypoint_missing"}
+        return command_output([str(path)], min(900, max(5, int(args.get("timeout_seconds", 300)))))
 
     def _pty_session(self, pty_id):
         value = self.pty_sessions.get(str(pty_id))

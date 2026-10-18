@@ -49,6 +49,24 @@ def _version_key(value: Any) -> tuple | None:
     return core + (0,) * (6-len(core)), rank, suffix, tail
 
 
+def _host_stack_version_compatible(actual: Any, expected: Any) -> bool:
+    """Accept a final host release for an RC label in the same line."""
+    expected_text = str(expected or "").strip()
+    actual_text = str(actual or "").strip()
+    if not re.search(r"(?:rc|alpha|beta|dev)\d*", expected_text, re.I):
+        return False
+    actual_key, expected_key = _version_key(actual_text), _version_key(expected_text)
+    actual_tuple, expected_tuple = _version_tuple(actual_text), _version_tuple(expected_text)
+    if not actual_key or not expected_key or not actual_tuple or not expected_tuple:
+        return False
+    # A short 8.0 label is ambiguous and must not silently satisfy an 8.0.RC3
+    # requirement. Treat only an explicit final release (at least major.minor.patch,
+    # such as 8.0.0) as newer than the RC label.
+    if len(actual_tuple) < 3 or actual_tuple[:2] != expected_tuple[:2]:
+        return False
+    return actual_key >= expected_key
+
+
 def _compare(actual: Any, expected: Any) -> tuple[bool, str]:
     if expected is None:
         return True, ""
@@ -73,6 +91,8 @@ def _compare(actual: Any, expected: Any) -> tuple[bool, str]:
     match = re.fullmatch(r"(>=|<=|==|=|>|<|~=)\s*(.+)", text)
     op, wanted = (match.group(1), match.group(2)) if match else ("==", text)
     if op in ("==", "="):
+        if _host_stack_version_compatible(actual, wanted):
+            return True, "host_release_after_rc:" + wanted
         return str(actual or "").strip().casefold() == wanted.casefold(), "expected_exact:" + wanted
     av, ev = _version_key(actual), _version_key(wanted)
     if av is None or ev is None:
