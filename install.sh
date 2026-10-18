@@ -104,28 +104,17 @@ if ((need_bootstrap)); then
   done
 fi
 STAGE="course bundle"
-if [[ -f "$PACKAGE_SOURCE_DIR/verify-bundle.sh" ]]; then
-  "$PACKAGE_SOURCE_DIR/verify-bundle.sh" --root "$PACKAGE_SOURCE_DIR" --quiet
-  install -d -m 0755 "$COURSE_BUNDLE_ROOT" "$COURSE_BUNDLE_ROOT/data" "$COURSE_BUNDLE_ROOT/experiments" "$COURSE_BUNDLE_ROOT/reference-labs" "$COURSE_DATA_ROOT"
-  install -m 0644 "$PACKAGE_SOURCE_DIR/course-bundle/manifest.json" "$COURSE_BUNDLE_ROOT/manifest.json"
-  for file in mindspore-training mindspore-evaluate mindspore-infer; do
-    install -m 0755 "$SOURCE_DIR/experiments/$file" "$COURSE_BUNDLE_ROOT/experiments/$file"
-  done
-  install -m 0644 "$SOURCE_DIR/reference-labs/train-lenet.py" "$COURSE_BUNDLE_ROOT/reference-labs/train-lenet.py"
-  install -m 0644 "$PACKAGE_SOURCE_DIR/course-bundle/data/mnist-verified.tar.zst" "$COURSE_BUNDLE_ROOT/data/mnist-verified.tar.zst"
-  COURSE_TMP="$(mktemp -d /tmp/smart-textbook-course.XXXXXX)"
-  zstd -dc "$PACKAGE_SOURCE_DIR/course-bundle/data/mnist-verified.tar.zst" | tar --no-same-owner --no-same-permissions -x -f - -C "$COURSE_TMP"
-  for file in train-images-idx3-ubyte.gz train-labels-idx1-ubyte.gz t10k-images-idx3-ubyte.gz t10k-labels-idx1-ubyte.gz; do
-    [[ -f "$COURSE_TMP/$file" ]] || { echo "course bundle data file missing: $file" >&2; exit 1; }
-    install -m 0644 "$COURSE_TMP/$file" "$COURSE_DATA_ROOT/$file"
-  done
-  rm -rf -- "$COURSE_TMP"
-  echo "verified course bundle installed at $COURSE_BUNDLE_ROOT; data at $COURSE_DATA_ROOT" >&2
+# The release must carry its own verified course payload.  The helper records a
+# persistent phase marker and repairs any interrupted copy on the next run.
+install -d -m 0700 "$STATE_DIR"
+if [[ -x "$PACKAGE_SOURCE_DIR/install-course-bundle.sh" ]]; then
+  "$PACKAGE_SOURCE_DIR/install-course-bundle.sh" --source-root "$PACKAGE_SOURCE_DIR" --bundle-root "$COURSE_BUNDLE_ROOT" --data-root "$COURSE_DATA_ROOT" --state-file "$STATE_DIR/course-bundle-state.json"
 else
-  echo "course bundle is absent from this installer source; use a GitHub release package that includes course-bundle/" >&2
+  echo "course bundle installer is absent; use a release package that includes course-bundle/" >&2
+  exit 1
 fi
 STAGE="host stack provisioning"
-install -d -m 0700 "$HOST_STACK_STATE_DIR" "$HOST_STACK_CACHE_DIR"
+install -d -m 0700 "$STATE_DIR" "$HOST_STACK_STATE_DIR" "$HOST_STACK_CACHE_DIR"
 # The bootstrap source may live in a temporary directory which is removed by
 # the EXIT trap. Persist the host-stack helper before it can schedule a
 # reboot-resume unit, so a fresh board can recover after reboot.

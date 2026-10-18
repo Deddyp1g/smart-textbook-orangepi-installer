@@ -27,14 +27,14 @@ sudo ./install.sh \
 
 ## 课程基础包契约
 
-`course-bundle/manifest.json` 固定了本发行包与服务器运行包的对应关系：当前 `20261018-v14` 需要 `aarch64`、Ascend 310B1、驱动 `25.2.0`、固件 `7.3.7.0.b507`、CANN/ACL `8.0.RC3`、CPython 3.10、MindSpore `2.5.0`、NumPy `1.26.4`、SciPy `1.13.1` 和 safetensors `0.8.0`。`verify-bundle.sh` 可在没有 ARM64 设备的隔离环境中验收包内容：
+`course-bundle/manifest.json` 固定了本发行包与服务器运行包的对应关系；当前正式 artifact 为 `orangepi-aarch64-ascend310b1-20261019-v15`，需要 `aarch64`、Ascend 310B1、驱动 `25.2.0`、固件 `7.3.7.0.b507`、CANN/ACL `8.0.RC3`、CPython 3.10、MindSpore `2.5.0`、NumPy `1.26.4`、SciPy `1.13.1` 和 safetensors `0.8.0`。`verify-bundle.sh` 可在没有 ARM64 设备的隔离环境中验收包内容（包括清单、独立 checksum、实验入口、参考脚本和 MNIST archive）：
 
 ```bash
 ./verify-bundle.sh --root .
 ./verify-bundle.sh --root . --json
 ```
 
-安装器保留课程基础包和 manifest 供审计；实际 Agent 运行时使用服务器签名 artifact 的 `current` 版本，下载失败或预检失败时不会切换旧版本。
+安装器保留课程基础包、`manifest.json` 和独立的 `course-bundle/SHA256SUMS` 供审计；manifest 同时列出四个 MNIST 压缩文件的大小和 SHA-256。`install-course-bundle.sh` 通过临时文件重命名逐项写入持久目录，并在 `/var/lib/smart-textbook/runtime-agent/course-bundle-state.json` 记录 `staging`、`extracting`、`verifying` 或 `complete` 阶段；重复执行会校验并修复中断或损坏的文件。实际 Agent 运行时使用服务器签名 artifact 的 `current` 版本，下载失败或预检失败时不会切换旧版本。
 
 ## 主机栈和恢复
 
