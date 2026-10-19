@@ -1,0 +1,16 @@
+{
+  "reference_mindspore": {
+    "training": {
+      "path": "experiments/mindspore-training",
+      "timeout_seconds": 900
+    },
+    "evaluate": {
+      "path": "experiments/mindspore-evaluate",
+      "timeout_seconds": 300
+    },
+    "infer": {
+      "path": "experiments/mindspore-infer",
+      "timeout_seconds": 300
+    }
+  }
+}
