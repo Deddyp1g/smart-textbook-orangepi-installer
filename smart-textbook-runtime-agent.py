@@ -8,6 +8,8 @@ import requests
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+# Pin the loaded source before releases/current can be atomically replaced.
+AGENT_SOURCE_PATH = Path(__file__).resolve()
 VERSION = "0.2.0"
 NAMESPACE = "/runtime-agent"
 MAX_BACKOFF = 60.0
@@ -71,9 +73,9 @@ def read_config():
     }
 
 
-def runtime_process_environment():
+def runtime_process_environment(runtime=None):
     env = dict(os.environ)
-    for key, value in RUNTIME_ENVIRONMENT.items():
+    for key, value in (RUNTIME_ENVIRONMENT if runtime is None else runtime).items():
         env[key] = value + (os.pathsep + env[key] if key in {"PYTHONPATH", "LD_LIBRARY_PATH", "PATH"} and env.get(key) else "")
     return env
 
@@ -176,6 +178,13 @@ def sync_runtime_assets(config, device_id, publish=True):
             code = detail.split(":", 1)[0] if detail else ""
             known = code.startswith(("artifact_", "course_bundle_"))
             value.update({"status": "error", "error": code if known else "artifact_sync_failed"})
+        elif value.get("status") == "deferred":
+            current = cached_artifact_state({**config, "artifact_revision": ""})
+            if current is not None:
+                active, environment = current
+                value = {**active, "update_pending": True,
+                         "desired_artifact_revision": value.get("desired_artifact_revision") or config.get("artifact_revision"),
+                         "reason": value.get("reason") or "runtime_in_use"}
         elif value.get("status") in {"synced", "offline_cached"}:
             environment = load_runtime_environment(config["artifact_root"])
             # The sync helper has already checked package versions and preflight
@@ -186,7 +195,7 @@ def sync_runtime_assets(config, device_id, publish=True):
                 value.update({"status": "incompatible", "error": "runtime_preflight_failed"})
         else:
             value = {"status": "error", "error": "artifact_sync_invalid_response"}
-        state = {key: value[key] for key in ("status", "artifact_revision", "error", "detail", "reason", "compatibility", "cache_verified", "requires_server_revalidation", "cached", "storage", "course_bundle", "experiment_catalog") if key in value}
+        state = {key: value[key] for key in ("status", "artifact_revision", "error", "detail", "reason", "compatibility", "cache_verified", "requires_server_revalidation", "cached", "storage", "course_bundle", "experiment_catalog", "update_pending", "desired_artifact_revision") if key in value}
         if publish:
             ARTIFACT_STATE = state
             LAST_ARTIFACT_SYNC = time.monotonic()
@@ -215,9 +224,9 @@ def load_private_key(path):
     return Ed25519PrivateKey.from_private_bytes(raw)
 
 
-def command_output(command, timeout=10):
+def command_output(command, timeout=10, environment=None):
     try:
-        result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=timeout, env=runtime_process_environment())
+        result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=timeout, env=runtime_process_environment(environment))
         return {"exit_code": result.returncode, "stdout": result.stdout[-4096:], "stderr": result.stderr[-4096:]}
     except subprocess.TimeoutExpired:
         return {"exit_code": None, "stdout": "", "stderr": "timeout"}
@@ -397,7 +406,7 @@ class RuntimeAgent:
         path = root / ".sync.lock"
         fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            fcntl.flock(fd, fcntl.LOCK_SH)
         except Exception:
             os.close(fd)
             raise
@@ -450,27 +459,47 @@ class RuntimeAgent:
                     return
             fresh = LAST_ARTIFACT_SYNC and time.monotonic() - LAST_ARTIFACT_SYNC < self.config.get("artifact_sync_interval", 300)
             same_revision = not self.config.get("artifact_revision") or self.config["artifact_revision"] == ARTIFACT_STATE.get("artifact_revision")
-            if fresh and ARTIFACT_STATE.get("status") == "ready" and same_revision:
+            pending_revision = ARTIFACT_STATE.get("desired_artifact_revision")
+            if fresh and ARTIFACT_STATE.get("status") == "ready" and (same_revision or (ARTIFACT_STATE.get("update_pending") and pending_revision == self.config.get("artifact_revision"))):
                 return
             self._sync_requested = (self._connection_epoch, self.generation, transport, dict(self.config))
-            ARTIFACT_STATE = {"status": "syncing"}
+            if ARTIFACT_STATE.get("status") == "ready":
+                ARTIFACT_STATE = {**ARTIFACT_STATE, "update_pending": True,
+                                  "desired_artifact_revision": self.config.get("artifact_revision")}
+            else:
+                active = cached_artifact_state({**self.config, "artifact_revision": ""})
+                if active is not None:
+                    state, environment = active
+                    ARTIFACT_STATE = {**state, "update_pending": True,
+                                      "desired_artifact_revision": self.config.get("artifact_revision")}
+                    RUNTIME_ENVIRONMENT = environment
+                else:
+                    ARTIFACT_STATE = {"status": "syncing"}
             if self._sync_thread is not None:
                 return
             self._sync_thread = threading.Thread(target=self._sync_worker, name="runtime-sync", daemon=True)
             self._sync_thread.start()
 
     def _maybe_reload_agent(self, value):
-        """Adopt the agent shipped by a verified release once it is current."""
+        """Adopt a verified agent only while no student holds its runtime."""
         if value.get("status") != "ready":
             return
-        candidate = Path(self.config.get("artifact_root") or "").resolve() / "current" / "smart-textbook-runtime-agent.py"
+        root = Path(self.config.get("artifact_root") or "").resolve()
+        lock_fd = os.open(str(root / ".sync.lock"), os.O_CREAT | os.O_RDWR, 0o600)
         try:
-            if not candidate.is_file() or candidate.resolve() == Path(__file__).resolve():
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return
+            candidate = root / "current" / "smart-textbook-runtime-agent.py"
+            if not candidate.is_file() or candidate.resolve() == AGENT_SOURCE_PATH:
                 return
             LOG.info("restarting from verified runtime agent %s", candidate)
             os.execv(sys.executable, [sys.executable, str(candidate)])
         except OSError:
             LOG.warning("verified runtime agent restart failed")
+        finally:
+            os.close(lock_fd)
 
     def _sync_worker(self):
         global ARTIFACT_STATE, RUNTIME_ENVIRONMENT, LAST_ARTIFACT_SYNC
@@ -550,7 +579,8 @@ class RuntimeAgent:
                 # Heartbeats also drive artifact discovery. The sync helper has
                 # its own interval throttle, so this remains cheap while still
                 # detecting a newly published experiment without reconnecting.
-                self._schedule_sync()
+                if self.authenticated and self.transport is not None:
+                    self._schedule_sync()
                 self._send_heartbeat()
             except Exception:
                 LOG.warning("heartbeat delivery failed")
@@ -724,40 +754,41 @@ class RuntimeAgent:
         return normalized or None
 
     def experiment(self, args):
-        experiment_id = str(args.get("experiment_id") or "")
-        step = str(args.get("step") or "")
-        root = Path(self.config.get("artifact_root") or "/opt/smart-textbook/runtime-agent/releases").resolve()
-        current = root / "current"
-        if not current.is_symlink():
-            return {"status": "error", "error": "runtime_artifact_not_ready"}
-        try:
-            release = current.resolve()
-        except OSError:
-            return {"status": "error", "error": "runtime_artifact_not_ready"}
-        if release == root or root not in release.parents:
-            return {"status": "error", "error": "runtime_artifact_path_invalid"}
-
-        catalog = self._experiment_catalog(release)
-        if catalog is None:
-            # v1 artifacts predate the manifest catalog and remain compatible
-            # through the original fixed dispatcher.
-            spec = FIXED_EXPERIMENTS.get(experiment_id, {}).get(step)
-            if spec is None:
-                return {"status": "error", "error": "experiment_step_not_allowlisted"}
-            path = release / "experiments" / spec
-            timeout = 300
-        else:
-            entry = catalog.get(experiment_id, {}).get(step)
-            if entry is None:
-                return {"status": "error", "error": "experiment_step_not_allowlisted"}
-            path = release / entry["path"]
-            timeout = entry["timeout_seconds"]
-
-        if path.is_symlink() or not path.is_file() or root not in path.resolve().parents:
-            return {"status": "error", "error": "experiment_entrypoint_missing"}
         lock_fd = self._acquire_runtime_lock()
         try:
-            return command_output([str(path)], min(900, max(5, int(args.get("timeout_seconds", timeout)))),)
+            experiment_id = str(args.get("experiment_id") or "")
+            step = str(args.get("step") or "")
+            root = Path(self.config.get("artifact_root") or "/opt/smart-textbook/runtime-agent/releases").resolve()
+            current = root / "current"
+            if not current.is_symlink():
+                return {"status": "error", "error": "runtime_artifact_not_ready"}
+            try:
+                release = current.resolve()
+            except OSError:
+                return {"status": "error", "error": "runtime_artifact_not_ready"}
+            if release == root or root not in release.parents:
+                return {"status": "error", "error": "runtime_artifact_path_invalid"}
+
+            catalog = self._experiment_catalog(release)
+            if catalog is None:
+                # v1 artifacts predate the manifest catalog and remain compatible
+                # through the original fixed dispatcher.
+                spec = FIXED_EXPERIMENTS.get(experiment_id, {}).get(step)
+                if spec is None:
+                    return {"status": "error", "error": "experiment_step_not_allowlisted"}
+                path = release / "experiments" / spec
+                timeout = 300
+            else:
+                entry = catalog.get(experiment_id, {}).get(step)
+                if entry is None:
+                    return {"status": "error", "error": "experiment_step_not_allowlisted"}
+                path = release / entry["path"]
+                timeout = entry["timeout_seconds"]
+
+            if path.is_symlink() or not path.is_file() or root not in path.resolve().parents:
+                return {"status": "error", "error": "experiment_entrypoint_missing"}
+            environment = load_runtime_environment(root) if (release / "runtime-environment.json").is_file() else None
+            return command_output([str(path)], min(900, max(5, int(args.get("timeout_seconds", timeout)))), environment=environment)
         finally:
             self._release_runtime_lock(lock_fd)
 
@@ -803,12 +834,14 @@ class RuntimeAgent:
             lock_fd = self._acquire_runtime_lock()
             master = slave = None
             try:
+                root = Path(self.config.get("artifact_root") or "/opt/smart-textbook/runtime-agent/releases").resolve()
+                environment = load_runtime_environment(root)
                 master, slave = pty.openpty()
                 self._set_pty_size(master, args.get("cols", 80), args.get("rows", 24))
                 proc = subprocess.Popen(
                     [PTY_SANDBOX_LAUNCHER, "--generation", generation, "--workspace", workspace],
                     stdin=slave, stdout=slave, stderr=slave, close_fds=True,
-                    start_new_session=True, env=runtime_process_environment(),
+                    start_new_session=True, env=runtime_process_environment(environment),
                 )
                 os.close(slave)
                 slave = None

@@ -9,7 +9,7 @@
 在全新的 ARM64 Orange Pi 上执行：
 
 ```bash
-VERSION=0.1.9
+VERSION=0.1.10
 curl -fLO "https://github.com/Deddyp1g/smart-textbook-orangepi-installer/releases/download/v${VERSION}/smart-textbook-orangepi-installer-${VERSION}.tar.gz"
 curl -fLO "https://github.com/Deddyp1g/smart-textbook-orangepi-installer/releases/download/v${VERSION}/smart-textbook-orangepi-installer-${VERSION}.tar.gz.sha256"
 sha256sum -c "smart-textbook-orangepi-installer-${VERSION}.tar.gz.sha256"
@@ -27,7 +27,7 @@ sudo ./install.sh \
 
 ## 课程基础包契约
 
-`course-bundle/manifest.json` 固定了本发行包与服务器运行包的对应关系；当前正式 artifact 为 `orangepi-aarch64-ascend310b1-20261019-v21`，需要 `aarch64`、Ascend 310B1、驱动 `25.2.0`、固件 `7.3.7.0.b507`、CANN/ACL `8.0.RC3`、CPython 3.10、MindSpore `2.5.0`、NumPy `1.26.4`、SciPy `1.13.1` 和 safetensors `0.8.0`。`verify-bundle.sh` 可在没有 ARM64 设备的隔离环境中验收包内容（包括清单、独立 checksum、实验入口、参考脚本和 MNIST archive）：
+`course-bundle/manifest.json` 固定了本发行包与服务器运行包的对应关系；当前正式 artifact 为 `orangepi-aarch64-ascend310b1-20261019-v22`，需要 `aarch64`、Ascend 310B1、驱动 `25.2.0`、固件 `7.3.7.0.b507`、CANN/ACL `8.0.RC3`、CPython 3.10、MindSpore `2.5.0`、NumPy `1.26.4`、SciPy `1.13.1` 和 safetensors `0.8.0`。`verify-bundle.sh` 可在没有 ARM64 设备的隔离环境中验收包内容（包括清单、独立 checksum、实验入口、参考脚本和 MNIST archive）：
 
 ```bash
 ./verify-bundle.sh --root .
@@ -35,6 +35,14 @@ sudo ./install.sh \
 ```
 
 安装器保留课程基础包、`manifest.json` 和独立的 `course-bundle/SHA256SUMS` 供审计；manifest 同时列出四个 MNIST 压缩文件的大小和 SHA-256。`install-course-bundle.sh` 通过临时文件重命名逐项写入持久目录，并在 `/var/lib/smart-textbook/runtime-agent/course-bundle-state.json` 记录 `staging`、`extracting`、`verifying` 或 `complete` 阶段；重复执行会校验并修复中断或损坏的文件。实际 Agent 运行时使用服务器签名 artifact 的 `current` 版本，下载失败或预检失败时不会切换旧版本。
+
+## 后续实验更新
+
+Agent 默认每 300 秒在后台检查兼容的新运行包；已批准设备通过认证心跳续期下载授权，新版本无需重新安装整张卡。服务器签名 manifest 将实验 catalog、入口脚本、基础数据和用户态依赖绑定到同一个不可变 revision。管理员发布新实验的步骤见 [UPDATES.md](UPDATES.md)。
+
+下载、解压和预检在候选目录进行，当前运行包仍可使用。实验和 PTY 在整个使用期间持有共享锁；激活新版本必须取得排他锁，遇到正在使用的学生会保留候选并推迟切换，下一周期重试。文件校验、依赖检查或预检失败都不会切换 `current`；状态会报告待更新版本或失败原因。每次切换采用原子替换，随后 Agent 在学生空闲时加载新版本。
+
+运行包更新维护共享基础文件，不修改 `/home/student` 中学生已有的代码、数据和作业目录。网页课程、实验步骤和界面仍需在智慧教材服务器单独发布，并与 catalog 的实验/步骤标识对应。更新范围受 manifest 兼容性和预检约束，不保证任意驱动、固件或硬件组合都能使用；主机栈变更应按下节流程处理。
 
 ## 主机栈和恢复
 

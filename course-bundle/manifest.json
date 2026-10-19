@@ -1,7 +1,7 @@
 {
   "schema": "smart-textbook/orangepi-course-bundle/v1",
-  "bundle_revision": "20261019-v21",
-  "artifact_revision": "orangepi-aarch64-ascend310b1-20261019-v21",
+  "bundle_revision": "20261019-v22",
+  "artifact_revision": "orangepi-aarch64-ascend310b1-20261019-v22",
   "required_experiment_entrypoints": [
     "experiments/mindspore-training",
     "experiments/mindspore-evaluate",

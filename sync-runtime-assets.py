@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import time
 import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -184,13 +185,21 @@ def course_bundle_manifest(manifest):
     return {"bundle_revision": revision, "files": normalized}
 
 
-def verify_course_bundle(release, manifest):
+def verify_course_bundle(release, manifest, receipt=None):
     """Verify every signed course asset after extraction and before activation."""
     bundle = course_bundle_manifest(manifest)
     if bundle is None:
         return {"status": "legacy_unmanaged"}
+    consumed = set()
+    if receipt is not None and valid_consumed_archives(release, manifest, receipt) and validate_tree(release, receipt.get("tree", {})):
+        consumed = {record["path"] for record in receipt.get("consumed_archives", [])}
     for item in bundle["files"]:
         path = safe_path(release, item["path"])
+        # A signed course bundle may also name a runtime archive that was
+        # deliberately consumed. Its root-only installation receipt proves
+        # the verified source bytes and complete unchanged extracted tree.
+        if item["path"] in consumed:
+            continue
         if path.is_symlink() or not path.is_file():
             raise RuntimeError("course_bundle_missing:" + item["path"])
         if path.stat().st_size != item["size"]:
@@ -239,32 +248,99 @@ def hash_file(path):
     return digest.hexdigest()
 
 
+DOWNLOAD_MAX_ATTEMPTS = 4
+DOWNLOAD_RETRY_BACKOFF_SECONDS = 2
+
+
+def _partial_path(destination: Path) -> Path:
+    return destination.with_name(destination.name + ".part")
+
+
+def _partial_size(path: Path, expected_size: int) -> int:
+    if path.is_symlink():
+        path.unlink()
+        return 0
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return 0
+    if size < 0 or size > expected_size or path.is_symlink() or not path.is_file():
+        path.unlink(missing_ok=True)
+        return 0
+    return size
+
+
 def download(url, destination, expected_size, expected_sha256, headers, verify_tls):
+    """Download a signed asset with persistent partials and HTTP range retries."""
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.is_file() and destination.stat().st_size == expected_size and hash_file(destination) == expected_sha256:
         return
-    temporary = None
-    try:
-        with requests.get(url, headers=headers, stream=True, timeout=(20, 120), verify=verify_tls) as response:
-            response.raise_for_status()
-            digest = hashlib.sha256()
-            size = 0
-            with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as stream:
-                temporary = Path(stream.name)
-                for chunk in response.iter_content(1024 * 1024):
-                    if chunk:
-                        size += len(chunk)
-                        if size > expected_size:
-                            raise RuntimeError("artifact_file_size_exceeded")
-                        digest.update(chunk)
-                        stream.write(chunk)
-        if size != expected_size or digest.hexdigest() != expected_sha256:
-            raise RuntimeError("artifact_file_integrity_failed")
-        temporary.chmod(0o644)
-        os.replace(temporary, destination)
-    finally:
-        if temporary:
-            temporary.unlink(missing_ok=True)
+    partial = _partial_path(destination)
+    offset = _partial_size(partial, expected_size)
+    if partial.is_file() and offset == expected_size:
+        if hash_file(partial) == expected_sha256:
+            partial.chmod(0o644)
+            os.replace(partial, destination)
+            return
+        partial.unlink(missing_ok=True)
+        offset = 0
+    last_error = None
+    for attempt in range(1, DOWNLOAD_MAX_ATTEMPTS + 1):
+        request_headers = dict(headers or {})
+        if offset:
+            request_headers["Range"] = f"bytes={offset}-"
+        try:
+            with requests.get(url, headers=request_headers, stream=True, timeout=(20, 120), verify=verify_tls) as response:
+                response.raise_for_status()
+                # A server that ignores Range must be treated as a fresh body;
+                # appending it would silently duplicate the partial prefix.
+                append = bool(offset and getattr(response, "status_code", None) == 206)
+                if not append:
+                    offset = 0
+                digest = hashlib.sha256()
+                size = 0
+                if append:
+                    with partial.open("rb") as existing:
+                        for chunk in iter(lambda: existing.read(1024 * 1024), b""):
+                            digest.update(chunk)
+                    size = offset
+                with partial.open("ab" if append else "wb") as stream:
+                    for chunk in response.iter_content(1024 * 1024):
+                        if chunk:
+                            size += len(chunk)
+                            if size > expected_size:
+                                raise RuntimeError("artifact_file_size_exceeded")
+                            digest.update(chunk)
+                            stream.write(chunk)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            if size == expected_size and digest.hexdigest() == expected_sha256:
+                partial.chmod(0o644)
+                os.replace(partial, destination)
+                return
+            last_error = RuntimeError("artifact_file_integrity_failed")
+            # A complete but invalid body cannot be resumed. Start over while
+            # retaining short partials for the next range request.
+            if size >= expected_size:
+                partial.unlink(missing_ok=True)
+                offset = 0
+            else:
+                offset = size
+        except (requests.RequestException, OSError, RuntimeError) as exc:
+            last_error = exc
+            offset = _partial_size(partial, expected_size)
+            if offset == expected_size:
+                if hash_file(partial) == expected_sha256:
+                    partial.chmod(0o644)
+                    os.replace(partial, destination)
+                    return
+                partial.unlink(missing_ok=True)
+                offset = 0
+        if attempt < DOWNLOAD_MAX_ATTEMPTS:
+            time.sleep(DOWNLOAD_RETRY_BACKOFF_SECONDS * attempt)
+    if isinstance(last_error, RuntimeError):
+        raise last_error
+    raise RuntimeError("artifact_download_failed") from last_error
 
 
 def extract_archive(source: Path, target: Path):
@@ -661,7 +737,7 @@ def validated_cache(release, public_key, expected_digest=None, allow_pending=Fal
             return None
         if not valid_consumed_archives(release, manifest, receipt) or not validate_tree(release, receipt.get("tree", {})):
             return None
-        verify_course_bundle(release, manifest)
+        verify_course_bundle(release, manifest, receipt)
         return manifest
     except (OSError, ValueError, RuntimeError, KeyError, TypeError):
         return None
@@ -670,7 +746,7 @@ def validated_cache(release, public_key, expected_digest=None, allow_pending=Fal
 def verify_and_activate(root, release, manifest):
     receipt = json.loads((release / STATE_FILE).read_text())
     try:
-        bundle = verify_course_bundle(release, manifest)
+        bundle = verify_course_bundle(release, manifest, receipt)
         catalog = experiment_catalog_manifest(manifest)
         report = preflight_release(release, manifest, process_environment(runtime_environment(release, manifest)))
         report["course_bundle"] = bundle
@@ -690,7 +766,25 @@ def verify_and_activate(root, release, manifest):
     # heartbeat instead of being downloaded and extracted again.
     receipt["tree"] = snapshot_tree(release)
     write_receipt(release, receipt)
-    activate(root, release)
+    if (root / "current").is_symlink() and (root / "current").resolve() == release:
+        return report
+    # Downloads and candidate validation may proceed during student execution.
+    # Only switching current needs the execution lock, and must never wait on
+    # an open PTY. Keep this verified candidate for a later activation attempt.
+    with (root / ".sync.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            current_revision = None
+            try:
+                current_revision = json.loads((root / "current" / "manifest.json").read_text()).get("artifact_revision")
+            except (OSError, ValueError, AttributeError):
+                pass
+            report.update(status="deferred", update_pending=True,
+                          desired_artifact_revision=manifest["artifact_revision"],
+                          artifact_revision=current_revision)
+            return report
+        activate(root, release)
     return report
 
 
@@ -836,7 +930,7 @@ def synchronize(args):
     cached = pending
     if cached is not None:
         report = verify_and_activate(root, release, cached)
-        cleanup = prune_releases(root, args.artifact_public_key)
+        cleanup = {} if report.get("status") == "deferred" else prune_releases(root, args.artifact_public_key)
         return {"status": "synced", "artifact_revision": revision, "cached": True, "file_count": len(manifest["files"]), "storage": {"cleanup": cleanup, "cleanup_before": cleanup_before}, **report}
     # A previous successful install may use an immutable suffix when the
     # canonical directory was incomplete. Reuse that verified current release
@@ -850,7 +944,7 @@ def synchronize(args):
         current_cached = validated_cache(current_release, args.artifact_public_key, digest)
         if current_cached is not None:
             report = verify_and_activate(root, current_release, current_cached)
-            cleanup = prune_releases(root, args.artifact_public_key)
+            cleanup = {} if report.get("status") == "deferred" else prune_releases(root, args.artifact_public_key)
             return {"status": "synced", "artifact_revision": revision, "cached": True, "file_count": len(manifest["files"]), "storage": {"cleanup": cleanup, "cleanup_before": cleanup_before}, **report}
     storage = check_storage_capacity(root, manifest, install_userland=args.install_userland)
     storage["cleanup_before"] = cleanup_before
@@ -894,7 +988,7 @@ def synchronize(args):
         receipt = {"manifest_sha256": digest, "phase": "staged", "consumed_archives": consumed_archives, "tree": snapshot_tree(release)}
         write_receipt(release, receipt)
         report = verify_and_activate(root, release, manifest)
-        cleanup = prune_releases(root, args.artifact_public_key)
+        cleanup = {} if report.get("status") == "deferred" else prune_releases(root, args.artifact_public_key)
         storage["cleanup"] = cleanup
         return {"status": "synced", "artifact_revision": revision, "cached": False, "file_count": len(manifest["files"]), "userland": installed, "storage": storage, **report}
     except Exception as exc:
@@ -919,7 +1013,7 @@ def main():
     args = parser.parse_args()
     root = Path(args.root).resolve()
     root.mkdir(parents=True, exist_ok=True)
-    with (root / ".sync.lock").open("a") as lock:
+    with (root / ".download.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         report = synchronize(args)
     print(json.dumps(report, ensure_ascii=False))
