@@ -182,6 +182,41 @@
         }
       },
       "additionalProperties": false
+    },
+    "experiments": {
+      "type": "object",
+      "description": "Signed experiment dispatcher index. Each step points to a declared immutable release file.",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "minProperties": 1,
+        "additionalProperties": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^(?!/)(?!.*(?:^|/)\\\\.\\\\.(?:/|$))(?!.*\\\\\\\\)(?!.*:).+"
+            },
+            {
+              "type": "object",
+              "required": [
+                "path"
+              ],
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "pattern": "^(?!/)(?!.*(?:^|/)\\\\.\\\\.(?:/|$))(?!.*\\\\\\\\)(?!.*:).+"
+                },
+                "timeout_seconds": {
+                  "type": "integer",
+                  "minimum": 5,
+                  "maximum": 900
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
+        }
+      }
     }
   },
   "additionalProperties": true
