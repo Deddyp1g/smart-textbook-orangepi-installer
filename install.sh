@@ -92,7 +92,7 @@ for cmd in curl openssl tar zstd systemctl setpriv; do command -v "$cmd" >/dev/n
 CURL_ARGS=(--fail --silent --show-error --connect-timeout 20 --max-time 60)
 [[ "$VERIFY_TLS" == true ]] || CURL_ARGS+=(--insecure)
 STAGE="bootstrap source files"
-bootstrap_files=(bootstrap-dependencies.sh agent-requirements.lock preflight.py sync-runtime-assets.py smart-textbook-runtime-agent.py smart-textbook-runtime-agent.service pty-sandbox-launcher scrub-generation terminate-generation requirements.txt runtime-manifest.schema.json provision-host-stack.py install-course-bundle.sh verify-bundle.sh course-bundle/manifest.json course-bundle/SHA256SUMS course-bundle/data/mnist-verified.tar.zst experiments/mindspore-training experiments/mindspore-evaluate experiments/mindspore-infer reference-labs/train-lenet.py)
+bootstrap_files=(bootstrap-dependencies.sh agent-requirements.lock preflight.py sync-runtime-assets.py smart-textbook-runtime-agent.py smart-textbook-runtime-agent.service pty-sandbox-launcher scrub-generation terminate-generation requirements.txt runtime-manifest.schema.json provision-host-stack.py install-course-bundle.sh verify-bundle.sh course-bundle/manifest.json course-bundle/SHA256SUMS course-bundle/data/mnist-verified.tar.zst experiments/catalog.json experiments/mindspore-training experiments/mindspore-evaluate experiments/mindspore-infer reference-labs/train-lenet.py)
 need_bootstrap=0
 for file in "${bootstrap_files[@]}"; do [[ -f "$SOURCE_DIR/$file" ]] || { need_bootstrap=1; break; }; done
 if ((need_bootstrap)); then
@@ -216,15 +216,14 @@ except Exception:
 PY
 )"
   if [[ -n "$EXPECTED_ARTIFACT_REVISION" && "$ARTIFACT_REVISION" != "$EXPECTED_ARTIFACT_REVISION" ]]; then
-    echo "server artifact $ARTIFACT_REVISION does not match this installer's course bundle $EXPECTED_ARTIFACT_REVISION; download the matching release" >&2
-    exit 1
+    echo "notice: server selected runtime $ARTIFACT_REVISION; local course bundle is $EXPECTED_ARTIFACT_REVISION; signed runtime files will be used after activation" >&2
   fi
 fi
 [[ -n "$ARTIFACT_SERVER" ]] || ARTIFACT_SERVER="$SERVER_URL"
 STAGE="agent and student initialization"
 for file in smart-textbook-runtime-agent.py sync-runtime-assets.py preflight.py pty-sandbox-launcher terminate-generation scrub-generation; do install -m 0755 "$SOURCE_DIR/$file" "$PREFIX/$file"; done
 install -d -m 0755 "$PREFIX/experiments" "$SHARED_LABS_DIR" "$SYSTEMD_DIR" "$PROFILE_DIR"
-for file in mindspore-training mindspore-evaluate mindspore-infer; do install -m 0755 "$SOURCE_DIR/experiments/$file" "$PREFIX/experiments/$file"; done
+for file in catalog.json mindspore-training mindspore-evaluate mindspore-infer; do install -m 0755 "$SOURCE_DIR/experiments/$file" "$PREFIX/experiments/$file"; done
 install -m 0644 "$SOURCE_DIR/reference-labs/train-lenet.py" "$SHARED_LABS_DIR/train-lenet.py"
 if ! id student >/dev/null 2>&1; then useradd --create-home --home-dir "$STUDENT_HOME" --shell /bin/bash student; fi
 install -d -m 0700 "$STUDENT_HOME" "$STUDENT_HOME/lab_reference_mindspore"
@@ -248,7 +247,7 @@ from pathlib import Path
 prefix,env_path,unit_path,template=sys.argv[1:]
 p=shlex.quote(prefix); env=shlex.quote(env_path)
 wrapper=Path(prefix)/'start-agent.sh'
-wrapper.write_text('#!/usr/bin/env bash\nset -Eeuo pipefail\nset -a\n. '+env+'\nset +u\nif [[ -n "${SMART_TEXTBOOK_AGENT_CANN_ENV_SCRIPT:-}" && -f "$SMART_TEXTBOOK_AGENT_CANN_ENV_SCRIPT" ]]; then . "$SMART_TEXTBOOK_AGENT_CANN_ENV_SCRIPT"; fi\nset -u\n. '+p+'/releases/current/runtime.env\nset +a\nexec '+p+'/venv/bin/python '+p+'/smart-textbook-runtime-agent.py\n')
+wrapper.write_text('#!/usr/bin/env bash\nset -Eeuo pipefail\nset -a\n. '+env+'\nset +u\nif [[ -n "${SMART_TEXTBOOK_AGENT_CANN_ENV_SCRIPT:-}" && -f "$SMART_TEXTBOOK_AGENT_CANN_ENV_SCRIPT" ]]; then . "$SMART_TEXTBOOK_AGENT_CANN_ENV_SCRIPT"; fi\nset -u\n. '+p+'/releases/current/runtime.env\nset +a\nAGENT_SCRIPT='+p+'/releases/current/smart-textbook-runtime-agent.py\n[[ -f "$AGENT_SCRIPT" ]] || AGENT_SCRIPT='+p+'/smart-textbook-runtime-agent.py\nexec '+p+'/venv/bin/python "$AGENT_SCRIPT"\n')
 wrapper.chmod(0o755)
 text=Path(template).read_text().replace('EnvironmentFile=-/etc/smart-textbook/runtime-agent.env','EnvironmentFile='+env_path).replace('ExecStart=/opt/smart-textbook/runtime-agent/start-agent.sh','ExecStart='+prefix+'/start-agent.sh')
 Path(unit_path).write_text(text); Path(unit_path).chmod(0o644)
