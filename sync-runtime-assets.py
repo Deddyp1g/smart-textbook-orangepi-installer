@@ -101,6 +101,105 @@ def safe_path(root: Path, relative: str) -> Path:
     return candidate
 
 
+
+def experiment_catalog_manifest(manifest):
+    """Validate the signed manifest-driven experiment dispatcher contract."""
+    catalog = manifest.get("experiments")
+    if catalog is None:
+        return None
+    if not isinstance(catalog, dict) or not catalog or len(catalog) > 128:
+        raise RuntimeError("experiment_catalog_invalid")
+    declared = {
+        str(item.get("path")): item
+        for item in (manifest.get("files") or [])
+        if isinstance(item, dict) and item.get("path")
+    }
+    normalized = {}
+    for experiment_id, steps in catalog.items():
+        exp_id = str(experiment_id)
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", exp_id):
+            raise RuntimeError("experiment_id_invalid")
+        if not isinstance(steps, dict) or not steps or len(steps) > 64:
+            raise RuntimeError("experiment_steps_invalid")
+        normalized_steps = {}
+        for step_name, spec in steps.items():
+            step = str(step_name)
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", step):
+                raise RuntimeError("experiment_step_invalid")
+            if isinstance(spec, str):
+                path, timeout = spec, 300
+            elif isinstance(spec, dict):
+                path, timeout = str(spec.get("path") or ""), spec.get("timeout_seconds", 300)
+            else:
+                raise RuntimeError("experiment_entry_invalid")
+            path_obj = PurePosixPath(path)
+            if (
+                not path
+                or path_obj.is_absolute()
+                or "\\" in path
+                or ":" in path
+                or ".." in path_obj.parts
+                or path in {".", ".."}
+                or path not in declared
+            ):
+                raise RuntimeError("experiment_path_invalid")
+            if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 5 or timeout > 900:
+                raise RuntimeError("experiment_timeout_invalid")
+            normalized_steps[step] = {"path": path, "timeout_seconds": timeout}
+        normalized[exp_id] = normalized_steps
+    return normalized
+
+
+def course_bundle_manifest(manifest):
+    """Return the signed course experiment/data bundle declaration."""
+    bundle = manifest.get("course_bundle")
+    if bundle is None:
+        return None
+    if not isinstance(bundle, dict):
+        raise RuntimeError("course_bundle_invalid")
+    revision = str(bundle.get("bundle_revision") or bundle.get("revision") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", revision) or revision in {".", "..", "current"}:
+        raise RuntimeError("course_bundle_revision_invalid")
+    entries = bundle.get("files")
+    if not isinstance(entries, list) or not entries:
+        raise RuntimeError("course_bundle_files_missing")
+    seen = set()
+    normalized = []
+    declared = {str(item.get("path")): item for item in (manifest.get("files") or []) if isinstance(item, dict)}
+    for item in entries:
+        if not isinstance(item, dict):
+            raise RuntimeError("course_bundle_file_invalid")
+        relative = str(item.get("path") or "")
+        if not relative or relative in {".", ".."} or relative in seen or relative.startswith("/") or "\\" in relative or ".." in PurePosixPath(relative).parts or ":" in relative:
+            raise RuntimeError("course_bundle_path_invalid")
+        size = item.get("size")
+        digest = str(item.get("sha256") or "")
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0 or not re.fullmatch(r"[a-f0-9]{64}", digest):
+            raise RuntimeError("course_bundle_integrity_metadata_invalid")
+        parent = declared.get(relative)
+        if parent is not None and (parent.get("size") != size or str(parent.get("sha256") or "") != digest):
+            raise RuntimeError("course_bundle_manifest_mismatch")
+        seen.add(relative)
+        normalized.append({"path": relative, "size": size, "sha256": digest})
+    return {"bundle_revision": revision, "files": normalized}
+
+
+def verify_course_bundle(release, manifest):
+    """Verify every signed course asset after extraction and before activation."""
+    bundle = course_bundle_manifest(manifest)
+    if bundle is None:
+        return {"status": "legacy_unmanaged"}
+    for item in bundle["files"]:
+        path = safe_path(release, item["path"])
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeError("course_bundle_missing:" + item["path"])
+        if path.stat().st_size != item["size"]:
+            raise RuntimeError("course_bundle_size_mismatch:" + item["path"])
+        if hash_file(path) != item["sha256"]:
+            raise RuntimeError("course_bundle_hash_mismatch:" + item["path"])
+    return {"status": "ready", "bundle_revision": bundle["bundle_revision"], "file_count": len(bundle["files"])}
+
+
 def validate_manifest(manifest, artifact, public_key):
     signature = str(artifact.get("signature") or manifest.get("signature") or "")
     if not signature or not public_key:
@@ -127,6 +226,8 @@ def validate_manifest(manifest, artifact, public_key):
         seen.add(relative)
         if not isinstance(item.get("size"), int) or item["size"] < 0 or not re.fullmatch(r"[a-f0-9]{64}", str(item.get("sha256") or "")):
             raise RuntimeError("artifact_file_integrity_metadata_invalid")
+    course_bundle_manifest(manifest)
+    experiment_catalog_manifest(manifest)
     return digest, signature
 
 
@@ -560,6 +661,7 @@ def validated_cache(release, public_key, expected_digest=None, allow_pending=Fal
             return None
         if not valid_consumed_archives(release, manifest, receipt) or not validate_tree(release, receipt.get("tree", {})):
             return None
+        verify_course_bundle(release, manifest)
         return manifest
     except (OSError, ValueError, RuntimeError, KeyError, TypeError):
         return None
@@ -568,7 +670,14 @@ def validated_cache(release, public_key, expected_digest=None, allow_pending=Fal
 def verify_and_activate(root, release, manifest):
     receipt = json.loads((release / STATE_FILE).read_text())
     try:
+        bundle = verify_course_bundle(release, manifest)
+        catalog = experiment_catalog_manifest(manifest)
         report = preflight_release(release, manifest, process_environment(runtime_environment(release, manifest)))
+        report["course_bundle"] = bundle
+        report["experiment_catalog"] = (
+            {"status": "ready", "experiment_count": len(catalog)}
+            if catalog is not None else {"status": "legacy_fixed"}
+        )
     except Exception as exc:
         receipt.update(phase="preflight_failed", error=str(exc)[:600] if isinstance(exc, RuntimeError) else type(exc).__name__)
         write_receipt(release, receipt)
