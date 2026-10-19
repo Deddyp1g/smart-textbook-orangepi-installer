@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64, ctypes, json, errno, fcntl, logging, os, platform, pty, re, secrets, select, signal, socket, struct, subprocess, sys, termios, threading, time
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 import requests
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -56,14 +56,34 @@ def challenge_message(device_id, nonce, generation, issued_at):
     return json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
 
 
+def server_origin(value, field="server_url", required=True):
+    if not value or not value.strip():
+        if required:
+            raise ValueError(f"{field}_not_configured: device is not paired; pair the device or set its local environment configuration")
+        return ""
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+        valid = (parsed.scheme in {"http", "https"} and parsed.hostname
+                 and parsed.username is None and parsed.password is None
+                 and parsed.path in {"", "/"} and "?" not in value and "#" not in value
+                 and not any(ch.isspace() or ord(ch) < 32 for ch in value)
+                 and "\\" not in value)
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError(f"{field}_invalid: expected an http(s) server origin without credentials, path, query or fragment")
+    return value.rstrip("/")
+
+
 def read_config():
     return {
-        "server_url": os.getenv("SMART_TEXTBOOK_AGENT_SERVER_URL", "https://server.example.invalid"),
+        "server_url": server_origin(os.getenv("SMART_TEXTBOOK_AGENT_SERVER_URL", "")),
         "verify_tls": os.getenv("SMART_TEXTBOOK_AGENT_VERIFY_TLS", "true").lower() == "true",
         "private_key": Path(os.getenv("SMART_TEXTBOOK_AGENT_PRIVATE_KEY", "/etc/smart-textbook/runtime-agent.ed25519")),
         "device_id": os.getenv("SMART_TEXTBOOK_AGENT_DEVICE_ID", ""),
         "heartbeat_seconds": max(5.0, float(os.getenv("SMART_TEXTBOOK_AGENT_HEARTBEAT_SECONDS", "10"))),
-        "artifact_server_url": os.getenv("SMART_TEXTBOOK_AGENT_ARTIFACT_SERVER_URL", "").strip(),
+        "artifact_server_url": server_origin(os.getenv("SMART_TEXTBOOK_AGENT_ARTIFACT_SERVER_URL", ""), "artifact_server_url", required=False),
         "artifact_token": os.getenv("SMART_TEXTBOOK_AGENT_ARTIFACT_TOKEN", "").strip(),
         "artifact_public_key": os.getenv("SMART_TEXTBOOK_AGENT_ARTIFACT_SIGNING_PUBLIC_KEY", "").strip(),
         "artifact_sync_timeout": max(300.0, float(os.getenv("SMART_TEXTBOOK_AGENT_ARTIFACT_SYNC_TIMEOUT", "7200"))),

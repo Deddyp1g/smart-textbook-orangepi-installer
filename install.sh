@@ -29,13 +29,18 @@ KEY_PATH="${SMART_TEXTBOOK_AGENT_PRIVATE_KEY:-${ETC_DIR}/runtime-agent.ed25519}"
 ENV_PATH="${SMART_TEXTBOOK_AGENT_ENV_FILE:-${ETC_DIR}/runtime-agent.env}"
 SERVICE_NAME="smart-textbook-runtime-agent.service"
 NO_START=false
+PAIR_ONLY=false
+REBIND=false
 STAGE=arguments
 BOOTSTRAP_DIR=""
 cleanup() { [[ -z "$BOOTSTRAP_DIR" ]] || rm -rf -- "$BOOTSTRAP_DIR"; }
 trap cleanup EXIT
 trap 'echo "Orange Pi installation failed during $STAGE (line $LINENO); inspect this stage before rerunning" >&2' ERR
 usage() { cat <<'EOF'
-Usage: install.sh --server URL --enrollment-token TOKEN [--device-id ID] [--display-name NAME] [--insecure] [--timeout SECONDS] [--wheelhouse DIR] [--source-dir DIR] [--no-start] [--host-stack MODE]
+Usage: install.sh --server URL --pairing-code CODE [--pair-only] [--rebind] [--device-id ID] [--display-name NAME] [--insecure] [--timeout SECONDS] [--wheelhouse DIR] [--source-dir DIR] [--no-start] [--host-stack MODE]
+--pair-only waits for server approval without deploying course, host stack or runtime.
+--rebind explicitly allows replacing an existing server after the new server approves.
+--enrollment-token is an alias for --pairing-code. Missing URL/code prompt only on a terminal.
 --no-start installs and verifies the runtime without starting/enabling systemd (for chroot/rootfs acceptance).
 --host-stack never|verify|auto controls host driver/firmware/CANN provisioning (default: auto).
 Agent dependencies use the server's locked ARM64/CP310 wheelhouse; --wheelhouse overrides it with an offline directory.
@@ -44,7 +49,7 @@ EOF
 while (($#)); do
   case "$1" in
     --server) SERVER_URL="${2:?missing URL}"; shift 2 ;;
-    --enrollment-token) ENROLLMENT_TOKEN="${2:?missing token}"; shift 2 ;;
+    --enrollment-token|--pairing-code) ENROLLMENT_TOKEN="${2:?missing token}"; shift 2 ;;
     --device-id) DEVICE_ID="${2:?missing device id}"; shift 2 ;;
     --display-name) DISPLAY_NAME="${2:?missing display name}"; shift 2 ;;
     --insecure) VERIFY_TLS=false; shift ;;
@@ -52,6 +57,8 @@ while (($#)); do
     --source-dir) SOURCE_DIR="${2:?missing source dir}"; shift 2 ;;
     --wheelhouse) WHEELHOUSE="${2:?missing wheelhouse}"; shift 2 ;;
     --host-stack) HOST_STACK_MODE="${2:?missing host-stack mode}"; shift 2 ;;
+    --pair-only) PAIR_ONLY=true; shift ;;
+    --rebind) REBIND=true; shift ;;
     --no-start) NO_START=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option" >&2; usage >&2; exit 2 ;;
@@ -61,14 +68,45 @@ PACKAGE_SOURCE_DIR="$SOURCE_DIR"
 [[ "$EUID" -eq 0 ]] || { echo "run as root" >&2; exit 1; }
 ARCH="$(uname -m)"
 [[ "$ARCH" == aarch64 || "$ARCH" == arm64 ]] || { echo "unsupported architecture: $ARCH" >&2; exit 1; }
-[[ -n "$SERVER_URL" && -n "$ENROLLMENT_TOKEN" ]] || { usage >&2; exit 2; }
+if [[ -z "$SERVER_URL" ]]; then
+  [[ -t 0 ]] || { echo "--server is required in non-interactive mode" >&2; exit 2; }
+  read -r -p "Server URL: " SERVER_URL
+fi
+if [[ -z "$ENROLLMENT_TOKEN" ]]; then
+  [[ -t 0 ]] || { echo "--pairing-code is required in non-interactive mode" >&2; exit 2; }
+  read -r -s -p "Pairing code: " ENROLLMENT_TOKEN; echo >&2
+fi
+[[ -n "$SERVER_URL" && -n "$ENROLLMENT_TOKEN" ]] || { echo "server and pairing code cannot be empty" >&2; exit 2; }
 [[ "$TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ && "$POLL_SECONDS" =~ ^[1-9][0-9]*$ ]] || { echo "timeout and poll seconds must be positive integers" >&2; exit 2; }
 [[ "$VERIFY_TLS" == true || "$VERIFY_TLS" == false ]] || { echo "verify TLS must be true or false" >&2; exit 2; }
 [[ "$HOST_STACK_MODE" == never || "$HOST_STACK_MODE" == verify || "$HOST_STACK_MODE" == auto ]] || { echo "host-stack must be never, verify, or auto" >&2; exit 2; }
 SERVER_URL=${SERVER_URL%/}
-if [[ "$NO_START" == false && ! -d "${SMART_TEXTBOOK_AGENT_SYSTEMD_RUNTIME_DIR:-/run/systemd/system}" ]]; then
+if [[ "$PAIR_ONLY" == false && "$NO_START" == false && ! -d "${SMART_TEXTBOOK_AGENT_SYSTEMD_RUNTIME_DIR:-/run/systemd/system}" ]]; then
   echo "systemd is not running; use --no-start for rootfs verification, then start the installed service after boot" >&2; exit 1
 fi
+STAGE="server pairing"
+[[ -f "$SOURCE_DIR/pair-server.py" && -f "$SOURCE_DIR/preflight.py" ]] || { echo "pairing helpers missing; download the complete installer release package" >&2; exit 1; }
+# Only these transport/identity tools may be installed before approval.
+if [[ ! -x "$PYTHON" ]] || ! command -v openssl >/dev/null; then
+  DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 update
+  DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y --no-install-recommends python3 openssl ca-certificates
+fi
+export PAIR_SERVER="$SERVER_URL" PAIR_TOKEN="$ENROLLMENT_TOKEN"
+"$PYTHON" "$SOURCE_DIR/pair-server.py" --validate-only
+STAGE="device identity"
+if [[ -z "$DEVICE_ID" ]]; then DEVICE_ID="$(tr -d '[:space:]' < /etc/machine-id 2>/dev/null || true)"; [[ -n "$DEVICE_ID" ]] || DEVICE_ID="$(hostname)"; DEVICE_ID="orangepi-$DEVICE_ID"; fi
+[[ "$DEVICE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || { echo "invalid device id" >&2; exit 1; }
+install -d -m 0700 "$ETC_DIR" "$STATE_DIR"
+if [[ ! -s "$KEY_PATH" ]]; then tmp="$KEY_PATH.tmp.$BASHPID"; openssl genpkey -algorithm ED25519 -out "$tmp" >/dev/null 2>&1; chmod 600 "$tmp"; mv -f "$tmp" "$KEY_PATH"; fi
+chmod 600 "$KEY_PATH"
+PUBLIC_KEY="$(openssl pkey -in "$KEY_PATH" -pubout -outform DER 2>/dev/null | tail -c 32 | base64 | tr -d '\n' | tr '+/' '-_' | tr -d '=')"
+[[ "${#PUBLIC_KEY}" -eq 43 ]] || { echo "could not derive Ed25519 public key" >&2; exit 1; }
+export PAIR_DEVICE="$DEVICE_ID" PAIR_KEY="$KEY_PATH" PAIR_STATE="$STATE_DIR" PAIR_ENV="$ENV_PATH" PAIR_NAME="$DISPLAY_NAME" PAIR_TLS="$VERIFY_TLS" PAIR_TIMEOUT="$TIMEOUT_SECONDS" PAIR_POLL="$POLL_SECONDS"
+PAIR_ARGS=(); [[ "$REBIND" == false ]] || PAIR_ARGS+=(--rebind)
+"$PYTHON" "$SOURCE_DIR/pair-server.py" "${PAIR_ARGS[@]}" >/dev/null
+if [[ "$PAIR_ONLY" == true ]]; then echo "Server pairing approved for $DEVICE_ID"; exit 0; fi
+# The previous service remains untouched until the new server approves.
+if [[ "$REBIND" == true && "$NO_START" == false ]]; then systemctl stop "$SERVICE_NAME"; fi
 STAGE="base dependencies"
 # This block intentionally precedes HTTP bootstrap: clean Ubuntu images may lack curl.
 BASE_PACKAGES=(ca-certificates curl openssl python3 python3-venv tar zstd util-linux passwd coreutils systemd)
@@ -92,7 +130,7 @@ for cmd in curl openssl tar zstd systemctl setpriv; do command -v "$cmd" >/dev/n
 CURL_ARGS=(--fail --silent --show-error --connect-timeout 20 --max-time 60)
 [[ "$VERIFY_TLS" == true ]] || CURL_ARGS+=(--insecure)
 STAGE="bootstrap source files"
-bootstrap_files=(bootstrap-dependencies.sh agent-requirements.lock preflight.py sync-runtime-assets.py smart-textbook-runtime-agent.py smart-textbook-runtime-agent.service pty-sandbox-launcher scrub-generation terminate-generation requirements.txt runtime-manifest.schema.json provision-host-stack.py install-course-bundle.sh verify-bundle.sh course-bundle/manifest.json course-bundle/SHA256SUMS course-bundle/data/mnist-verified.tar.zst experiments/catalog.json experiments/mindspore-training experiments/mindspore-evaluate experiments/mindspore-infer reference-labs/train-lenet.py)
+bootstrap_files=(pair-server.py bootstrap-dependencies.sh agent-requirements.lock preflight.py sync-runtime-assets.py smart-textbook-runtime-agent.py smart-textbook-runtime-agent.service pty-sandbox-launcher scrub-generation terminate-generation requirements.txt runtime-manifest.schema.json provision-host-stack.py install-course-bundle.sh verify-bundle.sh course-bundle/manifest.json course-bundle/SHA256SUMS course-bundle/data/mnist-verified.tar.zst experiments/catalog.json experiments/mindspore-training experiments/mindspore-evaluate experiments/mindspore-infer reference-labs/train-lenet.py)
 need_bootstrap=0
 for file in "${bootstrap_files[@]}"; do [[ -f "$SOURCE_DIR/$file" ]] || { need_bootstrap=1; break; }; done
 if ((need_bootstrap)); then
@@ -156,13 +194,6 @@ install -d -m 0700 "$ETC_DIR" "$STATE_DIR"
 install -d -m 0755 "$PREFIX"
 SMART_TEXTBOOK_AGENT_SOURCE_DIR="$SOURCE_DIR" SMART_TEXTBOOK_AGENT_PREFIX="$PREFIX" SMART_TEXTBOOK_AGENT_PYTHON="$PYTHON" SMART_TEXTBOOK_AGENT_WHEELHOUSE="$WHEELHOUSE" SMART_TEXTBOOK_AGENT_SERVER_URL="$SERVER_URL" SMART_TEXTBOOK_AGENT_ENROLLMENT_TOKEN="$ENROLLMENT_TOKEN" SMART_TEXTBOOK_AGENT_VERIFY_TLS="$VERIFY_TLS" bash "$SOURCE_DIR/bootstrap-dependencies.sh"
 AGENT_PYTHON="$PREFIX/venv/bin/python"
-STAGE="device identity"
-if [[ -z "$DEVICE_ID" ]]; then DEVICE_ID="$(tr -d '[:space:]' < /etc/machine-id 2>/dev/null || true)"; [[ -n "$DEVICE_ID" ]] || DEVICE_ID="$(hostname)"; DEVICE_ID="orangepi-$DEVICE_ID"; fi
-[[ "$DEVICE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || { echo "invalid device id" >&2; exit 1; }
-if [[ ! -s "$KEY_PATH" ]]; then tmp="$KEY_PATH.tmp.$BASHPID"; openssl genpkey -algorithm ED25519 -out "$tmp" >/dev/null 2>&1; chmod 600 "$tmp"; mv -f "$tmp" "$KEY_PATH"; fi
-chmod 600 "$KEY_PATH"
-PUBLIC_KEY="$(openssl pkey -in "$KEY_PATH" -pubout -outform DER 2>/dev/null | tail -c 32 | base64 | tr -d '\n' | tr '+/' '-_' | tr -d '=')"
-[[ "${#PUBLIC_KEY}" -eq 43 ]] || { echo "could not derive Ed25519 public key" >&2; exit 1; }
 CANN_ENV=${SMART_TEXTBOOK_AGENT_CANN_ENV_SCRIPT:-}
 if [[ -z "$CANN_ENV" ]]; then
   for candidate in /usr/local/Ascend/ascend-toolkit/set_env.sh /usr/local/Ascend/ascend-toolkit/latest/set_env.sh; do [[ ! -f "$candidate" ]] || { CANN_ENV=$candidate; break; }; done
@@ -185,22 +216,8 @@ print(json.dumps({'device_id':device_id,'display_name':display_name,'public_key'
 PY
 )"
 STAGE=enrollment
-ENROLL_RESPONSE="$(curl "${CURL_ARGS[@]}" -X POST "$SERVER_URL/api/runtime-agent/enroll" -H 'Content-Type: application/json' -H "X-Runtime-Agent-Enrollment-Token: $ENROLLMENT_TOKEN" --data "$PAYLOAD")"
-ENROLLMENT_ID="$("$PYTHON" -c 'import json,sys; print(json.load(sys.stdin).get("enrollment_id",""))' <<<"$ENROLL_RESPONSE")"
-[[ -n "$ENROLLMENT_ID" ]] || { echo "server did not return enrollment_id" >&2; exit 1; }
-DEADLINE="$(( $(date +%s) + TIMEOUT_SECONDS ))"; READY_JSON=""
-while (( $(date +%s) < DEADLINE )); do
-  STATUS_RESPONSE="$(curl "${CURL_ARGS[@]}" "$SERVER_URL/api/runtime-agent/enroll/$DEVICE_ID" -H "X-Runtime-Agent-Enrollment-Token: $ENROLLMENT_TOKEN" 2>/dev/null || true)"
-  STATUS="$("$PYTHON" -c 'import json,sys; print(json.load(sys.stdin).get("status",""))' <<<"$STATUS_RESPONSE" 2>/dev/null || true)"
-  case "$STATUS" in
-    ready) READY_JSON="$STATUS_RESPONSE"; break ;;
-    approved_waiting_for_compatible_artifact|approved_waiting_for_artifact_secret) echo "enrollment approved; waiting for runtime artifact" >&2 ;;
-    pending|approved|"") ;;
-    *) echo "enrollment is not ready" >&2 ;;
-  esac
-  sleep "$POLL_SECONDS"
-done
-[[ -n "$READY_JSON" ]] || { echo "enrollment not approved/prepared before timeout" >&2; exit 1; }
+# Refresh hardware facts after approved host provisioning, preserving server approval.
+READY_JSON="$("$PYTHON" "$PACKAGE_SOURCE_DIR/pair-server.py" "${PAIR_ARGS[@]}" --ready)"
 # Extract separately: empty optional fields must not shift positional credentials.
 json_field() { "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1],""))' "$1" <<<"$READY_JSON"; }
 ARTIFACT_TOKEN=$(json_field artifact_token); ARTIFACT_REVISION=$(json_field artifact_revision)
@@ -216,14 +233,16 @@ except Exception:
 PY
 )"
   if [[ -n "$EXPECTED_ARTIFACT_REVISION" && "$ARTIFACT_REVISION" != "$EXPECTED_ARTIFACT_REVISION" ]]; then
-    echo "notice: server selected runtime $ARTIFACT_REVISION; local course bundle is $EXPECTED_ARTIFACT_REVISION; signed runtime files will be used after activation" >&2
+    echo "server artifact $ARTIFACT_REVISION does not match this installer's course bundle $EXPECTED_ARTIFACT_REVISION; download the matching release" >&2
+    exit 1
   fi
 fi
 [[ -n "$ARTIFACT_SERVER" ]] || ARTIFACT_SERVER="$SERVER_URL"
 STAGE="agent and student initialization"
 for file in smart-textbook-runtime-agent.py sync-runtime-assets.py preflight.py pty-sandbox-launcher terminate-generation scrub-generation; do install -m 0755 "$SOURCE_DIR/$file" "$PREFIX/$file"; done
 install -d -m 0755 "$PREFIX/experiments" "$SHARED_LABS_DIR" "$SYSTEMD_DIR" "$PROFILE_DIR"
-for file in catalog.json mindspore-training mindspore-evaluate mindspore-infer; do install -m 0755 "$SOURCE_DIR/experiments/$file" "$PREFIX/experiments/$file"; done
+for file in mindspore-training mindspore-evaluate mindspore-infer; do install -m 0755 "$SOURCE_DIR/experiments/$file" "$PREFIX/experiments/$file"; done
+install -m 0644 "$SOURCE_DIR/experiments/catalog.json" "$PREFIX/experiments/catalog.json"
 install -m 0644 "$SOURCE_DIR/reference-labs/train-lenet.py" "$SHARED_LABS_DIR/train-lenet.py"
 if ! id student >/dev/null 2>&1; then useradd --create-home --home-dir "$STUDENT_HOME" --shell /bin/bash student; fi
 install -d -m 0700 "$STUDENT_HOME" "$STUDENT_HOME/lab_reference_mindspore"
@@ -247,7 +266,7 @@ from pathlib import Path
 prefix,env_path,unit_path,template=sys.argv[1:]
 p=shlex.quote(prefix); env=shlex.quote(env_path)
 wrapper=Path(prefix)/'start-agent.sh'
-wrapper.write_text('#!/usr/bin/env bash\nset -Eeuo pipefail\nset -a\n. '+env+'\nset +u\nif [[ -n "${SMART_TEXTBOOK_AGENT_CANN_ENV_SCRIPT:-}" && -f "$SMART_TEXTBOOK_AGENT_CANN_ENV_SCRIPT" ]]; then . "$SMART_TEXTBOOK_AGENT_CANN_ENV_SCRIPT"; fi\nset -u\n. '+p+'/releases/current/runtime.env\nset +a\nAGENT_SCRIPT='+p+'/releases/current/smart-textbook-runtime-agent.py\n[[ -f "$AGENT_SCRIPT" ]] || AGENT_SCRIPT='+p+'/smart-textbook-runtime-agent.py\nexec '+p+'/venv/bin/python "$AGENT_SCRIPT"\n')
+wrapper.write_text('#!/usr/bin/env bash\nset -Eeuo pipefail\nset -a\n. '+env+'\nset +u\nif [[ -n "${SMART_TEXTBOOK_AGENT_CANN_ENV_SCRIPT:-}" && -f "$SMART_TEXTBOOK_AGENT_CANN_ENV_SCRIPT" ]]; then . "$SMART_TEXTBOOK_AGENT_CANN_ENV_SCRIPT"; fi\nset -u\n. '+p+'/releases/current/runtime.env\nset +a\nexec '+p+'/venv/bin/python '+p+'/smart-textbook-runtime-agent.py\n')
 wrapper.chmod(0o755)
 text=Path(template).read_text().replace('EnvironmentFile=-/etc/smart-textbook/runtime-agent.env','EnvironmentFile='+env_path).replace('ExecStart=/opt/smart-textbook/runtime-agent/start-agent.sh','ExecStart='+prefix+'/start-agent.sh')
 Path(unit_path).write_text(text); Path(unit_path).chmod(0o644)

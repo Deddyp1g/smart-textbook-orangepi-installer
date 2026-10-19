@@ -9,25 +9,24 @@
 在全新的 ARM64 Orange Pi 上执行：
 
 ```bash
-VERSION=0.1.10
+VERSION=0.2.0
 curl -fLO "https://github.com/Deddyp1g/smart-textbook-orangepi-installer/releases/download/v${VERSION}/smart-textbook-orangepi-installer-${VERSION}.tar.gz"
 curl -fLO "https://github.com/Deddyp1g/smart-textbook-orangepi-installer/releases/download/v${VERSION}/smart-textbook-orangepi-installer-${VERSION}.tar.gz.sha256"
 sha256sum -c "smart-textbook-orangepi-installer-${VERSION}.tar.gz.sha256"
 tar -xzf "smart-textbook-orangepi-installer-${VERSION}.tar.gz"
 cd smart-textbook-orangepi-installer-${VERSION}
-sudo ./install.sh \
-  --server http://server.example.invalid:5173 \
-  --enrollment-token '<一次性接入令牌>' \
-  --host-stack auto
+sudo ./install.sh
 ```
 
-安装器会先运行 `verify-bundle.sh`，校验课程清单中 5 个基础文件（3 个实验入口、参考脚本、MNIST 压缩包）的 SHA-256、大小和运行时契约，并把数据解压到 `/usr/local/share/smart-textbook/data/mnist`。随后它检查 ARM64、Python ABI、Ascend/NPU 事实和 CANN 版本，生成设备 Ed25519 身份，下载并校验服务器端依赖，然后向服务器申请接入。服务器管理员批准设备并准备兼容的运行时后，设备会自动同步签名运行包、再次预检并以 systemd 常驻服务运行。
+安装包没有默认服务器。运行后先输入目标智慧教材服务器的完整地址（含 `http://` 或 `https://` 和所需端口），再隐式输入管理员提供的配对码。安装器只准备配对工具、设备身份并采集只读硬件事实，提交配对申请；等待服务器管理员批准期间，不安装课程数据、CANN 主机栈、Agent 依赖或常驻服务。批准后，安装器才从刚绑定的服务器获取和补齐兼容环境，同步签名运行包、预检并启动 systemd 服务。
 
-一次性接入令牌由服务器管理员提供，不能写入仓库或镜像。设备审批完成前不会启动学生可用的运行时。
+无人值守安装可以通过 `--server https://textbook.example.edu --pairing-code <配对码>` 指定地址和配对码；该域名只是示例，应替换为实际部署地址。也可通过 `SMART_TEXTBOOK_AGENT_ENROLLMENT_TOKEN` 环境变量传入配对码，避免在命令行历史中记录。`--enrollment-token` 保持兼容。
+
+配对码由目标服务器管理员提供，不能写入仓库或镜像。`sudo ./install.sh --pair-only` 可以只申请配对，批准后退出；完整部署再用同一服务器和配对码运行安装器。绑定记录仅存放在设备本地的 root 专用状态目录，不含配对码。已绑定设备改连另一台服务器必须显式传入 `--rebind`，并经过新服务器重新批准；等待批准时保留原服务器配置。
 
 ## 课程基础包契约
 
-`course-bundle/manifest.json` 固定了本发行包与服务器运行包的对应关系；当前正式 artifact 为 `orangepi-aarch64-ascend310b1-20261019-v22`，需要 `aarch64`、Ascend 310B1、驱动 `25.2.0`、固件 `7.3.7.0.b507`、CANN/ACL `8.0.RC3`、CPython 3.10、MindSpore `2.5.0`、NumPy `1.26.4`、SciPy `1.13.1` 和 safetensors `0.8.0`。`verify-bundle.sh` 可在没有 ARM64 设备的隔离环境中验收包内容（包括清单、独立 checksum、实验入口、参考脚本和 MNIST archive）：
+`course-bundle/manifest.json` 固定了本发行包与服务器运行包的对应关系；当前正式 artifact 为 `orangepi-aarch64-ascend310b1-20261019-v23`，需要 `aarch64`、Ascend 310B1、驱动 `25.2.0`、固件 `7.3.7.0.b507`、CANN/ACL `8.0.RC3`、CPython 3.10、MindSpore `2.5.0`、NumPy `1.26.4`、SciPy `1.13.1` 和 safetensors `0.8.0`。`verify-bundle.sh` 可在没有 ARM64 设备的隔离环境中验收包内容（包括清单、独立 checksum、实验入口、参考脚本和 MNIST archive）：
 
 ```bash
 ./verify-bundle.sh --root .
@@ -53,6 +52,10 @@ Agent 默认每 300 秒在后台检查兼容的新运行包；已批准设备通
 ## 常用选项
 
 ```text
+--server URL           配对目标服务器，无预设地址
+--pairing-code CODE    管理员提供的配对码（兼容 --enrollment-token）
+--pair-only            配对获批后退出，不部署运行环境
+--rebind               显式申请切换到另一台服务器
 --host-stack auto|verify|never
 --device-id ID
 --display-name NAME
