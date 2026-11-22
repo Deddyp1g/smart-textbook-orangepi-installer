@@ -15,8 +15,10 @@ VENDOR_TOOLS = (
 )
 DRIVER_CGROUP = "/system.slice/start-davinci.service"
 MONITOR_COMMANDS = {
+    (b"-v",),
     (b"info",),
     (b"info", b"-l"),
+    (b"info", b"-t", b"board", b"-i", b"0"),
     (b"info", b"-t", b"health", b"-i", b"0"),
     (b"info", b"-t", b"usages", b"-i", b"0"),
 }

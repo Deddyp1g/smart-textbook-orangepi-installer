@@ -12,7 +12,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 AGENT_SOURCE_PATH = Path(__file__).resolve()
 import scoped_container
 
-VERSION = "0.2.1"
+VERSION = "0.2.2"
 NAMESPACE = "/runtime-agent"
 MAX_BACKOFF = 8.0
 AUTH_TIMEOUT_SECONDS = 15.0
