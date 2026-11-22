@@ -2,7 +2,7 @@
 """Fail closed before publishing server-neutral installer sources or packages."""
 import argparse
 import ipaddress
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import sys
 import tarfile
@@ -10,7 +10,11 @@ import tarfile
 IPV4 = re.compile(r'(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])')
 DOCUMENTATION = tuple(ipaddress.ip_network(value) for value in ('192.0.2.0/24', '198.51.100.0/24', '203.0.113.0/24'))
 EXCLUDED = {'.git', 'dist', '__pycache__'}
-REQUIRED = ('pair-server.py', 'preflight.py')
+REQUIRED = (
+    'pair-server.py', 'preflight.py', 'install-workspace.sh',
+    'smart-textbook-runtime-agent.py', 'runtime-agent.env.example',
+    'device/Dockerfile', 'device/ascend.bashrc', 'device/npu-scoped-ready', 'device/scoped_container.py',
+)
 
 def check_text(name, raw, errors):
     if '\x00'.encode() in raw:
@@ -38,8 +42,8 @@ def private_config(path):
 
 def verify(root, package=None):
     errors = []
-    for name in (*REQUIRED, 'runtime-agent.env.example'):
-        if not (root / name).is_file():
+    for name in REQUIRED:
+        if not (root / name).is_file() or (root / name).is_symlink():
             errors.append(f'{name}: required installer source missing')
     for path in root.rglob('*'):
         if any(part in EXCLUDED for part in path.relative_to(root).parts) or path.is_symlink() or not path.is_file() or private_config(path):
@@ -47,7 +51,27 @@ def verify(root, package=None):
         check_text(str(path.relative_to(root)), path.read_bytes(), errors)
     if package:
         with tarfile.open(package, 'r:*') as archive:
-            files = {member.name.rstrip('/').split('/')[-1] for member in archive.getmembers() if member.isfile()}
+            files = set()
+            prefixes = set()
+            for member in archive:
+                path = PurePosixPath(member.name)
+                if (path.is_absolute() or '..' in path.parts or '\\' in member.name
+                        or not path.parts or not (member.isdir() or member.isfile())):
+                    errors.append(f'{member.name}: unsafe package member')
+                    continue
+                prefixes.add(path.parts[0])
+                if member.isdir():
+                    continue
+                relative = PurePosixPath(*path.parts[1:]).as_posix()
+                if relative in files or relative == '.':
+                    errors.append(f'{member.name}: duplicate or unrooted package member')
+                files.add(relative)
+                if private_config(path):
+                    errors.append(f'{member.name}: private configuration in package')
+                else:
+                    check_text(member.name, archive.extractfile(member).read(), errors)
+            if len(prefixes) != 1:
+                errors.append('package must have one top-level directory')
             for name in REQUIRED:
                 if name not in files:
                     errors.append(f'{name}: required file missing from package')

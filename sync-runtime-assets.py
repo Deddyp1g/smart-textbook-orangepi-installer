@@ -17,10 +17,17 @@ import sys
 import tarfile
 import time
 import tempfile
+from contextlib import ExitStack, contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import quote
 import requests
+try:
+    import scoped_container
+except ModuleNotFoundError as exc:
+    if exc.name != "scoped_container":
+        raise
+    from device import scoped_container
 
 SYSTEM_PYTHON = "/usr/bin/python3"
 STATE_FILE = ".installation.json"
@@ -743,6 +750,24 @@ def validated_cache(release, public_key, expected_digest=None, allow_pending=Fal
         return None
 
 
+@contextmanager
+def runtime_idle(root):
+    with ExitStack() as stack:
+        lock = stack.enter_context((root / ".sync.lock").open("a"))
+        idle = True
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            # Old standalone sync callers may have no agent state directory.
+            # Container placement also requires that directory to exist first.
+            if scoped_container.CONTROL.parent.is_dir():
+                stack.enter_context(scoped_container.locked(nonblocking=True))
+                idle = not (os.path.lexists(scoped_container.CONTROL / "active.json")
+                            or scoped_container.list_managed())
+        except (OSError, subprocess.SubprocessError, scoped_container.WorkspaceUnavailable):
+            idle = False
+        yield idle
+
+
 def verify_and_activate(root, release, manifest):
     receipt = json.loads((release / STATE_FILE).read_text())
     try:
@@ -768,13 +793,9 @@ def verify_and_activate(root, release, manifest):
     write_receipt(release, receipt)
     if (root / "current").is_symlink() and (root / "current").resolve() == release:
         return report
-    # Downloads and candidate validation may proceed during student execution.
-    # Only switching current needs the execution lock, and must never wait on
-    # an open PTY. Keep this verified candidate for a later activation attempt.
-    with (root / ".sync.lock").open("a") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+    # Keep the verified candidate when a lease or legacy PTY is active.
+    with runtime_idle(root) as idle:
+        if not idle:
             current_revision = None
             try:
                 current_revision = json.loads((root / "current" / "manifest.json").read_text()).get("artifact_revision")
@@ -864,16 +885,19 @@ def prune_releases(root, public_key, keep_verified=2, preserve=None):
         keep.append(item)
     keep_set = set(keep)
     removed = []
-    for item in root.iterdir():
-        if item.name in {"current", ".downloads", ".sync.lock"} or item.name.startswith("."):
-            continue
-        if item.is_symlink() or not item.is_dir() or item in keep_set or item.resolve() in preserve:
-            continue
-        try:
-            shutil.rmtree(item)
-            removed.append(item.name)
-        except OSError:
-            continue
+    with runtime_idle(root) as idle:
+        if not idle:
+            return {"status": "deferred", "reason": "runtime_in_use"}
+        for item in root.iterdir():
+            if item.name in {"current", ".downloads", ".sync.lock"} or item.name.startswith("."):
+                continue
+            if item.is_symlink() or not item.is_dir() or item in keep_set or item.resolve() in preserve:
+                continue
+            try:
+                shutil.rmtree(item)
+                removed.append(item.name)
+            except OSError:
+                continue
     cache = cleanup_download_cache(root, keep)
     return {
         "kept": [item.name for item in keep],
@@ -919,6 +943,9 @@ def synchronize(args):
     artifact, manifest = payload["artifact"], payload["manifest"]
     digest, signature = validate_manifest(manifest, artifact, args.artifact_public_key)
     revision = manifest["artifact_revision"]
+    expected = getattr(args, "expected_revision", None)
+    if expected and revision != expected:
+        raise RuntimeError("approved_artifact_revision_changed")
     release = root / (revision + "-" + digest[:16])
     # Preserve a staged candidate so a failed preflight can be retried without
     # downloading its verified archives again.
@@ -1008,6 +1035,7 @@ def main():
     parser.add_argument("--token", default=os.getenv("SMART_TEXTBOOK_AGENT_ARTIFACT_TOKEN", ""))
     parser.add_argument("--root", default="/opt/smart-textbook/runtime-agent/releases")
     parser.add_argument("--install-userland", action="store_true")
+    parser.add_argument("--expected-revision")
     parser.add_argument("--artifact-public-key", default=os.getenv("SMART_TEXTBOOK_AGENT_ARTIFACT_SIGNING_PUBLIC_KEY", ""))
     parser.add_argument("--insecure", action="store_true")
     args = parser.parse_args()

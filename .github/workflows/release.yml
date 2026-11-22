@@ -16,7 +16,10 @@ jobs:
       - name: Verify course bundle
         run: ./verify-bundle.sh --root .
       - name: Verify public configuration
-        run: python3 ./verify-public-config.py --root .
+        run: |
+          python3 -m unittest discover -s tests -v
+          python3 ./verify-public-config.py --root .
+          test "$GITHUB_REF_NAME" = "v$(cat VERSION)"
       - name: Build package
         run: ./build-package.sh
       - name: Publish release assets

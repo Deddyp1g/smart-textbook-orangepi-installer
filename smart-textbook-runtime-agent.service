@@ -1,9 +1,8 @@
 [Unit]
 Description=Smart Textbook Orange Pi runtime agent
-Wants=network-online.target
-After=network-online.target time-sync.target
-StartLimitIntervalSec=300
-StartLimitBurst=20
+Wants=network-online.target docker.service
+After=network-online.target time-sync.target docker.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -12,7 +11,11 @@ Group=root
 EnvironmentFile=-/etc/smart-textbook/runtime-agent.env
 ExecStart=/opt/smart-textbook/runtime-agent/start-agent.sh
 Restart=always
-RestartSec=3
+RestartSec=10
+WatchdogSec=180
+WatchdogSignal=SIGKILL
+NotifyAccess=main
+TimeoutStopSec=20
 UMask=0077
 LimitMEMLOCK=infinity
 # Ascend ACL requires shared host IPC/tmp and device access; protocol RPCs remain allow-listed.

@@ -10,14 +10,18 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 # Pin the loaded source before releases/current can be atomically replaced.
 AGENT_SOURCE_PATH = Path(__file__).resolve()
-VERSION = "0.2.0"
+import scoped_container
+
+VERSION = "0.2.1"
 NAMESPACE = "/runtime-agent"
-MAX_BACKOFF = 60.0
+MAX_BACKOFF = 8.0
+AUTH_TIMEOUT_SECONDS = 15.0
+HTTP_CONNECT_TIMEOUT = 4.0
 LOG = logging.getLogger("smart-textbook-runtime-agent")
 ARTIFACT_STATE = {"status": "unknown"}
 RUNTIME_ENVIRONMENT = {}
 LAST_ARTIFACT_SYNC = 0.0
-ALLOWED_RPCS = frozenset({"probe", "npu_smoke_test", "scrub", "terminate_generation", "execute_experiment", "pty"})
+ALLOWED_RPCS = frozenset({"probe", "npu_smoke_test", "scrub", "terminate_generation", "execute_experiment", "pty", "workspace_prepare", "workspace_cleanup", "scoped_npu_experiment"})
 PTY_SANDBOX_LAUNCHER = "/opt/smart-textbook/runtime-agent/pty-sandbox-launcher"
 PTY_LAUNCHER_TOKEN = "fixed:smart-textbook-pty-sandbox"
 MAX_PTY_SESSIONS = 2
@@ -77,12 +81,16 @@ def server_origin(value, field="server_url", required=True):
 
 
 def read_config():
+    heartbeat_seconds = max(5.0, float(os.getenv("SMART_TEXTBOOK_AGENT_HEARTBEAT_SECONDS", "10")))
     return {
         "server_url": server_origin(os.getenv("SMART_TEXTBOOK_AGENT_SERVER_URL", "")),
         "verify_tls": os.getenv("SMART_TEXTBOOK_AGENT_VERIFY_TLS", "true").lower() == "true",
         "private_key": Path(os.getenv("SMART_TEXTBOOK_AGENT_PRIVATE_KEY", "/etc/smart-textbook/runtime-agent.ed25519")),
         "device_id": os.getenv("SMART_TEXTBOOK_AGENT_DEVICE_ID", ""),
-        "heartbeat_seconds": max(5.0, float(os.getenv("SMART_TEXTBOOK_AGENT_HEARTBEAT_SECONDS", "10"))),
+        "heartbeat_ack_timeout": max(heartbeat_seconds * 2 + 20, float(os.getenv("SMART_TEXTBOOK_AGENT_HEARTBEAT_ACK_TIMEOUT", "60"))),
+        "require_time_sync": os.getenv("SMART_TEXTBOOK_AGENT_REQUIRE_TIME_SYNC", "true").lower() in ("1", "true", "yes", "on"),
+        "time_sync_timeout": max(5.0, float(os.getenv("SMART_TEXTBOOK_AGENT_TIME_SYNC_TIMEOUT", "180"))),
+        "heartbeat_seconds": heartbeat_seconds,
         "artifact_server_url": server_origin(os.getenv("SMART_TEXTBOOK_AGENT_ARTIFACT_SERVER_URL", ""), "artifact_server_url", required=False),
         "artifact_token": os.getenv("SMART_TEXTBOOK_AGENT_ARTIFACT_TOKEN", "").strip(),
         "artifact_public_key": os.getenv("SMART_TEXTBOOK_AGENT_ARTIFACT_SIGNING_PUBLIC_KEY", "").strip(),
@@ -91,6 +99,52 @@ def read_config():
         "artifact_root": os.getenv("SMART_TEXTBOOK_AGENT_ARTIFACT_ROOT", "/opt/smart-textbook/runtime-agent/releases"),
         "artifact_sync": os.getenv("SMART_TEXTBOOK_AGENT_ARTIFACT_SYNC", "true").lower() in ("1", "true", "yes", "on"),
     }
+
+
+def notify_watchdog():
+    """Only the main polling owner may feed systemd's independent watchdog."""
+    address = os.getenv("NOTIFY_SOCKET")
+    if (not address or not os.getenv("WATCHDOG_USEC")
+            or os.getenv("WATCHDOG_PID", str(os.getpid())) != str(os.getpid())
+            or threading.current_thread() is not threading.main_thread()):
+        return False
+    if address.startswith("@"):
+        address = "\0" + address[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as channel:
+            channel.settimeout(0.5)
+            channel.sendto(b"WATCHDOG=1", address)
+        return True
+    except OSError:
+        return False
+
+
+def wait_for_time_sync(config):
+    """Network-online ordering alone does not ensure a trustworthy RTC/NTP clock."""
+    if not config.get("require_time_sync", False):
+        return
+    deadline = time.monotonic() + config.get("time_sync_timeout", 180.0)
+    announced = False
+    while True:
+        notify_watchdog()
+        try:
+            result = subprocess.run(
+                ["/usr/bin/timedatectl", "show", "-p", "NTPSynchronized", "--value"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip() == "yes":
+                if announced:
+                    LOG.info("clock synchronized; starting authenticated connection")
+                return
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        if not announced:
+            LOG.warning("waiting for NTP clock synchronization before authentication")
+            announced = True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("clock_sync_not_ready")
+        time.sleep(min(2.0, remaining))
 
 
 def runtime_process_environment(runtime=None):
@@ -310,10 +364,21 @@ finally:
 
 def telemetry():
     data = {"hostname": socket.gethostname(), "arch": platform.machine(), "agent_version": VERSION}
+    data["scoped_workspace_v1"] = all(
+        Path("/opt/smart-textbook/runtime-agent", name).is_file()
+        for name in ("workspace-prepare", "workspace-cleanup", "pty-sandbox-launcher")
+    ) and subprocess.run(["id", "smarttextbook"], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, check=False).returncode == 0
+    data["scoped_npu_v1"] = data["scoped_workspace_v1"] and Path("/opt/smart-textbook/runtime-agent/npu-generation-experiment").is_file()
+    ready = Path("/opt/smart-textbook/runtime-agent/npu-scoped-ready")
+    data["scoped_npu_ready"] = data["scoped_npu_v1"] and ready.is_file() and subprocess.run(
+        [str(ready)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        timeout=15, check=False).returncode == 0
     npu_smi = next((candidate for candidate in ("/usr/bin/npu-smi", "/usr/local/sbin/npu-smi", "/usr/local/bin/npu-smi") if os.path.exists(candidate)), "npu-smi")
     data["npu"] = command_output([npu_smi, "info"], 5)
     data["acl_device"] = command_output(["/bin/sh", "-c", "test -e /dev/davinci0"], 2)
     data["runtime"] = runtime_facts()
+    data["container_workspaces"] = scoped_container.readiness()
     data["artifact_sync"] = dict(ARTIFACT_STATE)
     try:
         stat = os.statvfs("/")
@@ -340,7 +405,7 @@ class SocketIOPolling:
         return self.base_url + "?" + urlencode({"EIO": "4", "transport": "polling", "sid": self.sid} if self.sid else {"EIO": "4", "transport": "polling", "t": str(time.time_ns())})
 
     def connect(self):
-        opened = self.session.get(self._url(), timeout=20, verify=self.verify_tls)
+        opened = self.session.get(self._url(), timeout=(HTTP_CONNECT_TIMEOUT, 8), verify=self.verify_tls)
         opened.raise_for_status()
         packet = opened.text
         if not packet.startswith("0"):
@@ -348,7 +413,6 @@ class SocketIOPolling:
         details = json.loads(packet[1:].split("", 1)[0])
         self.sid = details["sid"]
         self._post("40" + NAMESPACE + ",")
-        self.poll(timeout=10)
 
     def _post(self, packet):
         # Long-poll reads and background RPC/heartbeat writes use separate
@@ -356,15 +420,16 @@ class SocketIOPolling:
         with self.post_lock:
             if not self.sid:
                 raise RuntimeError("engineio_session_closed")
-            response = self.post_session.post(self._url(), data=packet.encode(), headers={"Content-Type": "text/plain;charset=UTF-8"}, timeout=20, verify=self.verify_tls)
+            response = self.post_session.post(self._url(), data=packet.encode(), headers={"Content-Type": "text/plain;charset=UTF-8"},
+                                              timeout=(HTTP_CONNECT_TIMEOUT, 10), verify=self.verify_tls)
             response.raise_for_status()
 
     def emit(self, event, payload):
         packet = "42" + NAMESPACE + "," + json.dumps([event, payload], separators=(",", ":"))
         self._post(packet)
 
-    def poll(self, timeout=30):
-        response = self.session.get(self._url(), timeout=timeout + 10, verify=self.verify_tls)
+    def poll(self, timeout=35):
+        response = self.session.get(self._url(), timeout=(HTTP_CONNECT_TIMEOUT, timeout), verify=self.verify_tls)
         response.raise_for_status()
         for packet in response.text.split(""):
             if not packet:
@@ -372,6 +437,8 @@ class SocketIOPolling:
             if packet == "2":
                 self._post("3")
                 continue
+            if packet == "1":
+                raise RuntimeError("engineio_session_closed")
             if packet.startswith("4"):
                 message = packet[1:]
                 if message.startswith("2" + NAMESPACE + ","):
@@ -379,17 +446,19 @@ class SocketIOPolling:
                     yield data[0], data[1] if len(data) > 1 else {}
                 elif message.startswith("1" + NAMESPACE):
                     raise RuntimeError("socketio_namespace_closed")
+                elif message.startswith("4" + NAMESPACE):
+                    raise RuntimeError("socketio_namespace_rejected")
 
-    def close(self):
-        if self.sid:
+    def close(self, *, graceful=True):
+        if graceful and self.sid:
             try:
                 self._post("41" + NAMESPACE + ",")
             except Exception:
                 pass
-            self.sid = None
-        self.session.close()
         with self.post_lock:
+            self.sid = None
             self.post_session.close()
+        self.session.close()
 
 
 class RuntimeAgent:
@@ -414,6 +483,7 @@ class RuntimeAgent:
         self._rpc_slots = threading.BoundedSemaphore(4)
         self._telemetry_thread = None
         self._heartbeat_stop = threading.Event()
+        self._last_heartbeat_ack = None
         self._telemetry_cache = {"hostname": socket.gethostname(), "arch": platform.machine(), "agent_version": VERSION}
 
     def _connection_matches(self, epoch, generation, transport):
@@ -502,6 +572,8 @@ class RuntimeAgent:
 
     def _maybe_reload_agent(self, value):
         """Adopt a verified agent only while no student holds its runtime."""
+        if os.environ.get("SMART_TEXTBOOK_AGENT_PINNED_SOURCE") == "true":
+            return
         if value.get("status") != "ready":
             return
         root = Path(self.config.get("artifact_root") or "").resolve()
@@ -593,6 +665,23 @@ class RuntimeAgent:
             transport.emit("agent:heartbeat", {"device_id": self.device_id, "connection_generation": generation,
                            "timestamp": utcnow().isoformat(), "payload": data})
 
+    def _invalidate_connection(self, reason):
+        # Only the polling owner tears down transport; epoch fencing immediately
+        # prevents queued background work from publishing on lost authentication.
+        with self._state_lock:
+            self.authenticated = False
+            self._connection_epoch += 1
+            self._last_heartbeat_ack = None
+        raise RuntimeError(reason)
+
+    def _check_heartbeat_ack_timeout(self):
+        with self._state_lock:
+            expired = (self.authenticated and self._last_heartbeat_ack is not None
+                       and time.monotonic() - self._last_heartbeat_ack
+                       >= self.config.get("heartbeat_ack_timeout", 60.0))
+        if expired:
+            self._invalidate_connection("heartbeat_ack_timeout")
+
     def _heartbeat_worker(self):
         while not self._heartbeat_stop.wait(self.config["heartbeat_seconds"]):
             try:
@@ -616,6 +705,8 @@ class RuntimeAgent:
         return "orangepi-" + socket.gethostname()[:96]
 
     def hello(self):
+        with self._state_lock:
+            facts = self._telemetry_cache.get("runtime", {})
         return {
             "device_id": self.device_id,
             "public_key": b64(self.public_key),
@@ -626,7 +717,8 @@ class RuntimeAgent:
                 "experiment_ids": ["reference_mindspore"],
                 "npu": "/dev/davinci0",
                 "rpc_allowlist": sorted(ALLOWED_RPCS),
-                "facts": runtime_facts(),
+                "workspace_protocol": scoped_container.PROTOCOL,
+                "facts": facts,
                 "artifact_sync_required": bool(self.config.get("artifact_sync") and self.config.get("artifact_server_url")),
             },
         }
@@ -647,10 +739,24 @@ class RuntimeAgent:
                 self._connection_epoch += 1
                 self.generation = int(payload["connection_generation"])
                 self.authenticated = True
+                self._last_heartbeat_ack = time.monotonic()
             LOG.info("authenticated generation=%s", self.generation)
             self._apply_artifact_access(payload.get("artifact_access"))
             self._schedule_sync()
+            self._send_heartbeat()
+        elif event == "agent:error":
+            reason = payload.get("message")
+            if not self.authenticated:
+                self._invalidate_connection("authentication_rejected")
+            if reason in {"heartbeat_timestamp_out_of_range", "runtime_agent_not_connected", "connection_generation_stale"}:
+                self._invalidate_connection(reason)
         elif event == "agent:heartbeat:ack":
+            with self._state_lock:
+                if (not self.authenticated or payload.get("device_id") != self.device_id
+                        or payload.get("connection_generation") != self.generation
+                        or payload.get("status") != "online"):
+                    return
+                self._last_heartbeat_ack = time.monotonic()
             # The server renews the short-lived artifact token and advertises
             # the latest compatible revision in the heartbeat acknowledgement.
             # A changed revision is picked up on the next worker pass without a
@@ -700,9 +806,20 @@ class RuntimeAgent:
                     if warnings:
                         value["warnings"] = warnings
             elif rpc == "scrub":
-                value = self.fixed_script("scrub-generation", args, 180)
+                value = {"exit_code": 78, "stdout": "", "stderr": "legacy_generation_cleanup_disabled"}
             elif rpc == "terminate_generation":
-                value = self.fixed_script("terminate-generation", args, 30)
+                value = {"exit_code": 78, "stdout": "", "stderr": "legacy_generation_cleanup_disabled"}
+            elif rpc == "workspace_prepare":
+                if args.get("protocol") != scoped_container.PROTOCOL:
+                    raise ValueError("workspace_protocol_required")
+                value = scoped_container.prepare(args.get("generation"), args.get("profile"))
+            elif rpc == "workspace_cleanup":
+                if args.get("protocol") != scoped_container.PROTOCOL:
+                    raise ValueError("workspace_protocol_required")
+                value = scoped_container.cleanup(args.get("generation"), args.get("container_id"))
+            elif rpc == "scoped_npu_experiment":
+                action = args.get("action")
+                value = self.fixed_script("npu-generation-experiment", args, 900, extra=[action]) if action in ("train", "evaluate", "infer") else {"exit_code": 64, "stderr": "invalid_action", "stdout": ""}
             elif rpc == "execute_experiment":
                 value = self.experiment(args)
             elif rpc == "pty":
@@ -715,14 +832,14 @@ class RuntimeAgent:
             result.update(status="error", error=type(exc).__name__, detail=str(exc)[:512])
         return result
 
-    def fixed_script(self, name, args, timeout):
+    def fixed_script(self, name, args, timeout, extra=None):
         generation = str(args.get("generation") or "")
         if not generation or "/" in generation or ".." in generation or len(generation) > 128:
             return {"status": "error", "error": "invalid_generation"}
         path = Path("/opt/smart-textbook/runtime-agent") / name
         if not path.is_file():
             return {"status": "error", "error": "script_missing"}
-        return command_output([str(path), generation], timeout)
+        return command_output([str(path), generation, *(extra or [])], timeout)
 
     def _experiment_catalog(self, release):
         manifest_path = release / "manifest.json"
@@ -849,8 +966,7 @@ class RuntimeAgent:
                 return {"status": "error", "error": "pty_limit_reached"}
             generation = self._safe_generation(args.get("workspace_generation"))
             workspace = self._safe_workspace(args.get("workspace"))
-            if not os.path.isfile(PTY_SANDBOX_LAUNCHER):
-                return {"status": "error", "error": "pty_launcher_missing"}
+            command = scoped_container.pty_command(generation, workspace)
             lock_fd = self._acquire_runtime_lock()
             master = slave = None
             try:
@@ -859,7 +975,7 @@ class RuntimeAgent:
                 master, slave = pty.openpty()
                 self._set_pty_size(master, args.get("cols", 80), args.get("rows", 24))
                 proc = subprocess.Popen(
-                    [PTY_SANDBOX_LAUNCHER, "--generation", generation, "--workspace", workspace],
+                    command,
                     stdin=slave, stdout=slave, stderr=slave, close_fds=True,
                     start_new_session=True, env=runtime_process_environment(environment),
                 )
@@ -878,6 +994,8 @@ class RuntimeAgent:
             return {"status": "ok", "pty_id": pty_id}
         pty_id = args.get("pty_id")
         session = self._pty_session(pty_id)
+        if session.get("generation") != args.get("generation"):
+            return {"status": "error", "error": "pty_generation_mismatch"}
         master, proc = session["master"], session["process"]
         if action == "write":
             encoded = args.get("data")
@@ -944,16 +1062,43 @@ class RuntimeAgent:
         backoff = 1.0
         while True:
             try:
+                notify_watchdog()
+                wait_for_time_sync(self.config)
+                notify_watchdog()
                 self.transport = SocketIOPolling(self.config["server_url"], self.config["verify_tls"])
                 self.transport.connect()
+                notify_watchdog()
                 self.transport.emit("agent:hello", self.hello())
-                backoff = 1.0
+                notify_watchdog()
+                auth_deadline = time.monotonic() + AUTH_TIMEOUT_SECONDS
                 while self.transport.sid:
-                    for event, payload in self.transport.poll(timeout=25):
+                    notify_watchdog()
+                    self._check_heartbeat_ack_timeout()
+                    poll_timeout = 35
+                    with self._state_lock:
+                        if not self.authenticated:
+                            remaining = auth_deadline - time.monotonic()
+                            if remaining <= 0:
+                                raise RuntimeError("authentication_timeout")
+                            poll_timeout = remaining
+                        elif self._last_heartbeat_ack is not None:
+                            remaining = self.config.get("heartbeat_ack_timeout", 60.0) - (time.monotonic() - self._last_heartbeat_ack)
+                            poll_timeout = min(35, max(0.1, remaining))
+                    for event, payload in self.transport.poll(timeout=poll_timeout):
                         self.handle_event(event, payload)
+                        if event == "agent:authenticated":
+                            backoff = 1.0
+                        notify_watchdog()
+                    self._check_heartbeat_ack_timeout()
 
+            except requests.RequestException as error:
+                response = error.response
+                status = f" (HTTP {response.status_code})" if response is not None else ""
+                LOG.warning("connection lost: %s%s; retrying", type(error).__name__, status)
+            except RuntimeError as error:
+                LOG.warning("connection lost: %s; retrying", error)
             except Exception:
-                LOG.exception("connection loop failed")
+                LOG.exception("unexpected connection failure; retrying")
             finally:
                 with self._state_lock:
                     self._connection_epoch += 1
@@ -961,10 +1106,12 @@ class RuntimeAgent:
                     self.transport = None
                     self.generation = None
                     self.authenticated = False
+                    self._last_heartbeat_ack = None
                 if old_transport:
-                    old_transport.close()
+                    old_transport.close(graceful=False)
+            notify_watchdog()
             time.sleep(backoff)
-            backoff = min(MAX_BACKOFF, backoff * 2) * (0.8 + secrets.randbelow(41) / 100)
+            backoff = min(MAX_BACKOFF, backoff * (1.6 + secrets.randbelow(81) / 100))
 
     def close(self):
         self._ensure_background_state()
