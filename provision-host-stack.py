@@ -308,7 +308,7 @@ def _write_resume_unit(state_dir: Path, cache_dir: Path) -> None:
     facts_file = state_dir / "preflight-facts.json"
     command = " ".join(shlex.quote(str(value)) for value in ("/usr/bin/python3", script, "--mode", "auto", "--resume", "--manifest", manifest, "--facts-file", facts_file, "--cache-dir", cache_dir, "--state-dir", state_dir))
     text = """[Unit]
-Description=Smart Textbook Orange Pi host stack resume
+Description=Zhixue Lab Cloud Orange Pi host stack resume
 After=network-online.target
 Wants=network-online.target
 ConditionPathExists=%s

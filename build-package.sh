@@ -4,8 +4,8 @@ umask 022
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION")"
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "invalid VERSION" >&2; exit 2; }
-OUT="$ROOT/dist/smart-textbook-orangepi-installer-${VERSION}.tar.gz"
-PACKAGE_DIR="smart-textbook-orangepi-installer-${VERSION}"
+PACKAGE_DIR="zhixue-lab-cloud-orangepi-installer-${VERSION}"
+OUT="$ROOT/dist/$PACKAGE_DIR.tar.gz"
 mkdir -p -- "$ROOT/dist"
 "$ROOT/verify-bundle.sh" --root "$ROOT" --quiet
 python3 "$ROOT/verify-public-config.py" --root "$ROOT"

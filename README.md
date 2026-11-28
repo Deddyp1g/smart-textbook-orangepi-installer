@@ -1,24 +1,24 @@
-# Smart Textbook Orange Pi Installer
+# Zhixue Lab Cloud Orange Pi Installer
 
-这是智慧教材 Orange Pi 算力节点的接入安装包。安装包包含设备 Agent、ARM64 容器构建文件、MindSpore 实验入口、参考脚本和经摘要验证的 MNIST 基础数据。管理员批准配对后，安装器从配对服务器同步签名课程和运行时，按当前设备的 Ascend 驱动、固件、CANN 和 Python ABI 预检。兼容平台是 ARM64 Ubuntu 22.04。容器使用本机 Docker Unix socket。
+这是智学实验云的 Orange Pi 算力节点接入安装包。安装包包含设备 Agent、ARM64 容器构建文件、MindSpore 实验入口、参考脚本和经摘要验证的 MNIST 基础数据。管理员批准配对后，安装器从配对服务器同步签名课程和运行时，按当前设备的 Ascend 驱动、固件、CANN 和 Python ABI 预检。兼容平台是 ARM64 Ubuntu 22.04。容器使用本机 Docker Unix socket。
 
-仓库地址：<https://github.com/Deddyp1g/smart-textbook-orangepi-installer>
+仓库地址：<https://github.com/Deddyp1g/zhixue-lab-cloud-orangepi-installer>
 
 ## 下载并安装
 
 在全新的 ARM64 Orange Pi 上执行：
 
 ```bash
-VERSION=0.2.2
-curl -fLO "https://github.com/Deddyp1g/smart-textbook-orangepi-installer/releases/download/v${VERSION}/smart-textbook-orangepi-installer-${VERSION}.tar.gz"
-curl -fLO "https://github.com/Deddyp1g/smart-textbook-orangepi-installer/releases/download/v${VERSION}/smart-textbook-orangepi-installer-${VERSION}.tar.gz.sha256"
-sha256sum -c "smart-textbook-orangepi-installer-${VERSION}.tar.gz.sha256"
-tar -xzf "smart-textbook-orangepi-installer-${VERSION}.tar.gz"
-cd smart-textbook-orangepi-installer-${VERSION}
+VERSION=0.2.3
+curl -fLO "https://github.com/Deddyp1g/zhixue-lab-cloud-orangepi-installer/releases/download/v${VERSION}/zhixue-lab-cloud-orangepi-installer-${VERSION}.tar.gz"
+curl -fLO "https://github.com/Deddyp1g/zhixue-lab-cloud-orangepi-installer/releases/download/v${VERSION}/zhixue-lab-cloud-orangepi-installer-${VERSION}.tar.gz.sha256"
+sha256sum -c "zhixue-lab-cloud-orangepi-installer-${VERSION}.tar.gz.sha256"
+tar -xzf "zhixue-lab-cloud-orangepi-installer-${VERSION}.tar.gz"
+cd zhixue-lab-cloud-orangepi-installer-${VERSION}
 sudo ./install.sh
 ```
 
-运行安装器后，输入目标智慧教材服务器地址（含 `http://` 或 `https://` 和所需端口），再输入管理员提供的配对码。等候批准时，安装器准备配对工具和设备身份，并采集只读硬件信息。批准后，安装器准备 Docker 工作区和课程数据，同步并预检服务器签名的运行包，再启动 systemd 服务并等待设备通过认证。
+运行安装器后，输入目标智学实验云服务器地址（含 `http://` 或 `https://` 和所需端口），再输入管理员提供的配对码。等候批准时，安装器准备配对工具和设备身份，并采集只读硬件信息。批准后，安装器准备 Docker 工作区和课程数据，同步并预检服务器签名的运行包，再启动 systemd 服务并等待设备通过认证。
 
 升级已经在线的节点前，在管理端释放它的实验租约并暂停调度。重复执行安装器会沿用板上的身份。切换时，安装器复核容器已释放，遇到认证失败会恢复原 Agent 文件和服务配置。
 
@@ -45,7 +45,7 @@ Agent 默认每 300 秒在后台检查兼容的新运行包。已批准设备通
 
 下载、解压和预检在候选目录进行，当前运行包仍可使用。实验和 PTY 在整个使用期间持有共享锁；激活新版本必须取得排他锁，遇到正在使用的学生会保留候选并推迟切换，下一周期重试。文件校验、依赖检查或预检失败都不会切换 `current`；状态会报告待更新版本或失败原因。每次切换采用原子替换，随后 Agent 在学生空闲时加载新版本。
 
-网页课程、实验步骤和界面在智慧教材服务器发布，并与 catalog 的实验和步骤标识对应。主机栈变更按下节流程处理。
+网页课程、实验步骤和界面在智学实验云服务器发布，并与 catalog 的实验和步骤标识对应。主机栈变更按下节流程处理。
 
 ## CPU 与 Ascend 工作区
 
@@ -95,4 +95,4 @@ NPU 验收成功后，板卡会在下一次心跳更新时上报可用。验收�
 ./build-package.sh
 ```
 
-它会读取 `VERSION`，生成对应版本的 `dist/smart-textbook-orangepi-installer-<VERSION>.tar.gz` 和 `.sha256` 文件。构建过程不包含 `wheelhouse/`、Python 缓存、密钥或服务器配置；课程基础包和 MNIST 数据会随发行包包含。
+它会读取 `VERSION`，生成对应版本的 `dist/zhixue-lab-cloud-orangepi-installer-<VERSION>.tar.gz` 和 `.sha256` 文件。构建过程不包含 `wheelhouse/`、Python 缓存、密钥或服务器配置。课程基础包和 MNIST 数据会随发行包包含。

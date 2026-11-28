@@ -1,5 +1,5 @@
 [Unit]
-Description=Smart Textbook Orange Pi runtime agent
+Description=Zhixue Lab Cloud Orange Pi runtime agent
 Wants=network-online.target docker.service
 After=network-online.target time-sync.target docker.service
 StartLimitIntervalSec=0
